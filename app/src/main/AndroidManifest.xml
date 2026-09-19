@@ -11,7 +11,7 @@
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.SolYanIPTV"
-        android:icon="@drawable/solyan_iptv_logo"
+        android:icon="@drawable/solyan_iptv_icon"
         android:label="SolYan IPTV">
         <activity
             android:name=".MainActivity"

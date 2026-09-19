@@ -95,8 +95,6 @@ public class MainActivity extends Activity {
     private final Runnable hideStatusRunnable = () -> statusText.setVisibility(View.GONE);
     private int selectedPosition = 0;
     private long lastChannelZapAt = 0L;
-    // Smart stages: -2=576p/30 rescue, -1=720p/30 rescue, 0=720p baseline, 1=1080p boost.
-    private int smartStage = 0;
     private int recentRebufferCount = 0;
     private long lastReadyAt = 0L;
     private int droppedSinceQualityCheck = 0;
@@ -105,21 +103,9 @@ public class MainActivity extends Activity {
     private float originalPreferredRefreshRate = 0f;
     private boolean forceLowFpsForJudder = false;
     private boolean displayHas50Hz = false;
+    private boolean refreshAppliedForChannel = false;
     private final Runnable hideDrawerRunnable = () -> {
         if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) hideChannelDrawer();
-    };
-    private final Runnable recoverQualityRunnable = () -> {
-        if (videoMode != VideoMode.ADAPTIVE_1080 || player == null || !player.isPlaying()) return;
-        if (forceLowFpsForJudder) return;
-        if (smartStage < 1) {
-            smartStage++;
-            recentRebufferCount = 0;
-            droppedSinceQualityCheck = 0;
-            applyVideoMode();
-            updateModeLabel();
-            showStatus(smartStage == 1 ? "720p ổn định · thử nâng 1080p" : "Luồng ổn định · nâng chất lượng", 1800);
-            scheduleQualityRecovery();
-        }
     };
     private PlaylistStore playlistStore;
 
@@ -153,17 +139,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            if (videoMode == VideoMode.ADAPTIVE_1080) videoMode = VideoMode.MITV3_HW_1080;
-            else if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AUTO;
-            else videoMode = VideoMode.ADAPTIVE_1080;
-            smartStage = 0;
-            forceLowFpsForJudder = false;
-            recentRebufferCount = 0;
-            droppedSinceQualityCheck = 0;
-            uiHandler.removeCallbacks(recoverQualityRunnable);
-            applyVideoMode();
-            updateModeLabel();
-            showStatus("Chế độ: " + modeText(), 1800);
+            showStatus("STABLE 720 · ưu tiên ổn định", 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -254,6 +230,10 @@ public class MainActivity extends Activity {
                 .setAllowedVideoJoiningTimeMs(5000);
 
         trackSelector = new DefaultTrackSelector(this);
+        trackSelector.setParameters(
+                trackSelector.buildUponParameters()
+                        .setTunnelingEnabled(true)
+        );
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(20000, 60000, 2500, 6000)
@@ -261,7 +241,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.3 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.4 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -284,12 +264,10 @@ public class MainActivity extends Activity {
                     long now = android.os.SystemClock.elapsedRealtime();
                     if (lastReadyAt > 0 && now - lastReadyAt < 30000) {
                         recentRebufferCount++;
-                        if (recentRebufferCount >= 2) degradeSmartQuality("buffer yếu");
                     }
                     showStatus("Đang buffer…", 1200);
                 } else if (state == Player.STATE_READY) {
                     lastReadyAt = android.os.SystemClock.elapsedRealtime();
-                    scheduleQualityRecovery();
                     showStatus("Đang phát · " + effectiveQualityText(), 1400);
                     if (channelDrawer.getVisibility() != View.VISIBLE) {
                         playerView.requestFocus();
@@ -323,15 +301,13 @@ public class MainActivity extends Activity {
                 currentVideoFps = format == null ? 0f : format.frameRate;
                 if (currentVideoFps > 0f) {
                     maybeMatchDisplayRefresh(currentVideoFps);
-                    evaluateJudderFallback(currentVideoFps);
                 }
             }
 
             @Override public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
                 droppedSinceReport += droppedFrames;
                 droppedSinceQualityCheck += droppedFrames;
-                if (droppedSinceQualityCheck >= 45) {
-                    degradeSmartQuality("decoder rơi frame");
+                if (droppedSinceQualityCheck >= 120) {
                     droppedSinceQualityCheck = 0;
                 }
                 if (droppedSinceReport >= 120) droppedSinceReport = 0;
@@ -360,32 +336,10 @@ public class MainActivity extends Activity {
          .setExceedVideoConstraintsIfNecessary(true);
 
         if (videoMode == VideoMode.ADAPTIVE_1080) {
-            if (forceLowFpsForJudder) {
-                b.setMaxVideoSize(1280, 720)
-                 .setMaxVideoFrameRate(30)
-                 .setMaxVideoBitrate(5000000)
-                 .setPreferredVideoMimeTypes();
-            } else if (smartStage <= -2) {
-                b.setMaxVideoSize(1024, 576)
-                 .setMaxVideoFrameRate(30)
-                 .setMaxVideoBitrate(3500000)
-                 .setPreferredVideoMimeTypes();
-            } else if (smartStage == -1) {
-                b.setMaxVideoSize(1280, 720)
-                 .setMaxVideoFrameRate(30)
-                 .setMaxVideoBitrate(5000000)
-                 .setPreferredVideoMimeTypes();
-            } else if (smartStage == 0) {
-                b.setMaxVideoSize(1280, 720)
-                 .setMaxVideoFrameRate(60)
-                 .setMaxVideoBitrate(6500000)
-                 .setPreferredVideoMimeTypes();
-            } else {
-                b.setMaxVideoSize(1920, 1080)
-                 .setMaxVideoFrameRate(60)
-                 .setMaxVideoBitrate(11000000)
-                 .setPreferredVideoMimeTypes();
-            }
+            b.setMaxVideoSize(1280, 720)
+             .setMaxVideoFrameRate(60)
+             .setMaxVideoBitrate(6500000)
+             .setPreferredVideoMimeTypes();
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
              .setMaxVideoFrameRate(60)
@@ -401,24 +355,13 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) {
-            if (forceLowFpsForJudder) modeButton.setText("SMART 720/30");
-            else if (smartStage <= -2) modeButton.setText("SMART 576");
-            else if (smartStage == -1) modeButton.setText("SMART 720/30");
-            else if (smartStage == 0) modeButton.setText("SMART 720");
-            else modeButton.setText("SMART 1080");
-        } else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("STABLE 720");
+        else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) {
-            if (forceLowFpsForJudder) return "Smart 720/30";
-            if (smartStage <= -2) return "Smart 576/30";
-            if (smartStage == -1) return "Smart 720/30";
-            if (smartStage == 0) return "Smart 720";
-            return "Smart 1080";
-        }
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "Stable 720";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
         return "AUTO";
     }
@@ -658,7 +601,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.3 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.4 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -677,21 +620,20 @@ public class MainActivity extends Activity {
                 .putString(KEY_LAST_CHANNEL_URL, ch.url)
                 .putString(KEY_LAST_CHANNEL_NAME, ch.name)
                 .apply();
+        refreshAppliedForChannel = false;
         activeDecoder = "";
         droppedSinceReport = 0;
         droppedSinceQualityCheck = 0;
         recentRebufferCount = 0;
         lastReadyAt = 0L;
-        smartStage = 0;
         forceLowFpsForJudder = false;
-        uiHandler.removeCallbacks(recoverQualityRunnable);
         applyVideoMode();
         updateModeLabel();
         setStatus("Mở: " + ch.name + " · " + modeText());
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.3 MiTV3-60")
+                        : "SolYan-IPTV/0.3.4 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -718,35 +660,9 @@ public class MainActivity extends Activity {
         return b.build();
     }
 
-    private void degradeSmartQuality(String reason) {
-        if (videoMode != VideoMode.ADAPTIVE_1080) return;
-        int oldStage = smartStage;
-        if (smartStage > 0) smartStage = 0;
-        else if (smartStage == 0) smartStage = -1;
-        else if (smartStage == -1) smartStage = -2;
-        if (smartStage == oldStage) return;
-
-        uiHandler.removeCallbacks(recoverQualityRunnable);
-        recentRebufferCount = 0;
-        droppedSinceQualityCheck = 0;
-        applyVideoMode();
-        updateModeLabel();
-        showStatus("Tự hạ " + modeText() + " · " + reason, 1800);
-        scheduleQualityRecovery();
-    }
-
-    private void scheduleQualityRecovery() {
-        uiHandler.removeCallbacks(recoverQualityRunnable);
-        if (videoMode == VideoMode.ADAPTIVE_1080 && smartStage < 1 && !forceLowFpsForJudder) {
-            long delay = smartStage < 0 ? 45000L : 60000L;
-            uiHandler.postDelayed(recoverQualityRunnable, delay);
-        }
-    }
-
     private String effectiveQualityText() {
         return modeText();
     }
-
     private boolean hasRefreshRateNear(float targetHz) {
         if (Build.VERSION.SDK_INT < 21) return false;
         try {
@@ -771,28 +687,8 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private void evaluateJudderFallback(float fps) {
-        if (videoMode != VideoMode.ADAPTIVE_1080) return;
-        boolean is50Family = (fps >= 49f && fps <= 51f);
-        if (is50Family && !displayHas50Hz) {
-            if (!forceLowFpsForJudder) {
-                forceLowFpsForJudder = true;
-                smartStage = Math.min(smartStage, -1);
-                uiHandler.removeCallbacks(recoverQualityRunnable);
-                applyVideoMode();
-                updateModeLabel();
-                showStatus("Panel không có 50Hz · ưu tiên 720/30 để giảm giật", 2600);
-            }
-        } else if (forceLowFpsForJudder && (!is50Family || displayHas50Hz)) {
-            forceLowFpsForJudder = false;
-            smartStage = 0;
-            applyVideoMode();
-            updateModeLabel();
-        }
-    }
-
     private void maybeMatchDisplayRefresh(float fps) {
-        if (Build.VERSION.SDK_INT < 21 || fps <= 0f) return;
+        if (Build.VERSION.SDK_INT < 21 || fps <= 0f || refreshAppliedForChannel) return;
         try {
             float targetHz;
             if ((fps >= 24.5f && fps <= 25.5f) || (fps >= 49f && fps <= 51f)) targetHz = 50f;
@@ -823,6 +719,7 @@ public class MainActivity extends Activity {
                     lp.preferredDisplayModeId = best.getModeId();
                     lp.preferredRefreshRate = best.getRefreshRate();
                     getWindow().setAttributes(lp);
+                    refreshAppliedForChannel = true;
                     showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(best.getRefreshRate()) + "Hz", 1400);
                     return;
                 }
@@ -844,6 +741,7 @@ public class MainActivity extends Activity {
             if (bestRate > 0f && bestScore <= 1.5f) {
                 lp.preferredRefreshRate = bestRate;
                 getWindow().setAttributes(lp);
+                refreshAppliedForChannel = true;
                 showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(bestRate) + "Hz", 1400);
             }
         } catch (Throwable ignored) {}

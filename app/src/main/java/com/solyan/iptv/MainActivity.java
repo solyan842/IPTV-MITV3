@@ -115,7 +115,7 @@ public class MainActivity extends Activity {
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
     private VideoMode videoMode = VideoMode.MITV3_HW_1080;
-    private NativeQuality nativeQuality = NativeQuality.Q1080;
+    private NativeQuality nativeQuality = NativeQuality.Q720;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -160,7 +160,7 @@ public class MainActivity extends Activity {
 
         displayHas50Hz = hasRefreshRateNear(50f);
         applyPerfectSessionRefresh();
-        nativeQuality = loadNativeQuality();
+        nativeQuality = NativeQuality.Q720;
         buildPlayer();
         applyFallbackQuality();
         updateModeLabel();
@@ -170,18 +170,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            if (nativeQuality == NativeQuality.Q720) nativeQuality = NativeQuality.Q1080;
-            else if (nativeQuality == NativeQuality.Q1080) nativeQuality = NativeQuality.AUTO;
-            else nativeQuality = NativeQuality.Q720;
-
-            saveNativeQuality();
-            applyFallbackQuality();
-            updateModeLabel();
-            showStatus(nativeQualityText() + (displayHas50Hz ? " · 50Hz" : ""), 1300);
-
-            if (currentChannel != null) {
-                playChannel(currentChannel);
-            }
+            showStatus(displayHas50Hz ? "NATIVE 720 LOCK · 50Hz" : "NATIVE 720 LOCK", 1300);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -306,7 +295,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.4.3 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.4.4 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -429,7 +418,7 @@ public class MainActivity extends Activity {
              .setMaxVideoFrameRate(50)
              .setMaxVideoBitrate(6500000)
              .setForceHighestSupportedBitrate(true)
-             .setPreferredVideoMimeTypes();
+             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264);
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
              .setMaxVideoFrameRate(60)
@@ -445,39 +434,20 @@ public class MainActivity extends Activity {
     }
 
     private void applyFallbackQuality() {
-        if (nativeQuality == NativeQuality.Q720) videoMode = VideoMode.ADAPTIVE_1080;
-        else if (nativeQuality == NativeQuality.Q1080) videoMode = VideoMode.MITV3_HW_1080;
-        else videoMode = VideoMode.AUTO;
+        videoMode = VideoMode.ADAPTIVE_1080;
         applyVideoMode();
     }
 
     private void updateModeLabel() {
-        if (nativeQuality == NativeQuality.Q720) modeButton.setText("NATIVE 720");
-        else if (nativeQuality == NativeQuality.Q1080) modeButton.setText("NATIVE 1080");
-        else modeButton.setText("NATIVE AUTO");
+        modeButton.setText("NATIVE 720");
     }
 
     private String nativeQualityText() {
-        if (nativeQuality == NativeQuality.Q720) return "NATIVE 720";
-        if (nativeQuality == NativeQuality.Q1080) return "NATIVE 1080";
-        return "NATIVE AUTO";
+        return "NATIVE 720 LOCK";
     }
 
     private String modeText() {
-        return nativeQualityText();
-    }
-
-    private NativeQuality loadNativeQuality() {
-        String saved = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getString(KEY_NATIVE_QUALITY, "Q1080");
-        try { return NativeQuality.valueOf(saved); }
-        catch (Exception ignored) { return NativeQuality.Q1080; }
-    }
-
-    private void saveNativeQuality() {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString(KEY_NATIVE_QUALITY, nativeQuality.name())
-                .apply();
+        return "Native 720 Lock";
     }
 
     private String decoderSuffix() {
@@ -715,7 +685,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.3 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -774,13 +744,13 @@ public class MainActivity extends Activity {
 
         final HashMap<String, String> headers = new HashMap<>(ch.headers);
         if (!headers.containsKey("User-Agent")) {
-            headers.put("User-Agent", "SolYan-IPTV/0.4.3 MiTV3-60");
+            headers.put("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
         }
 
         io.execute(() -> {
             String resolvedUrl = ch.url;
             try {
-                resolvedUrl = resolveNativeVariant(ch.url, headers, nativeQuality);
+                resolvedUrl = resolveNativeVariant(ch.url, headers, NativeQuality.Q720);
             } catch (Exception ignored) {
                 resolvedUrl = ch.url;
             }
@@ -800,7 +770,7 @@ public class MainActivity extends Activity {
 
         final HashMap<String, String> headers = new HashMap<>(ch.headers);
         if (!headers.containsKey("User-Agent")) {
-            headers.put("User-Agent", "SolYan-IPTV/0.4.3 MiTV3-60");
+            headers.put("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
         }
 
         try {
@@ -876,10 +846,7 @@ public class MainActivity extends Activity {
     }
 
     private String resolveNativeVariant(String masterUrl, Map<String, String> headers, NativeQuality quality) throws Exception {
-        if (quality == NativeQuality.AUTO || masterUrl == null
-                || !masterUrl.toLowerCase().contains(".m3u8")) {
-            return masterUrl;
-        }
+        if (masterUrl == null || !masterUrl.toLowerCase().contains(".m3u8")) return masterUrl;
 
         HttpURLConnection conn = (HttpURLConnection) new URL(masterUrl).openConnection();
         conn.setConnectTimeout(8000);
@@ -896,13 +863,8 @@ public class MainActivity extends Activity {
         br.close();
         conn.disconnect();
 
-        int targetHeight = quality == NativeQuality.Q720 ? 720 : 1080;
-        String bestAvcUrl = null;
-        int bestAvcHeight = -1;
-        int bestAvcBitrate = -1;
-        String bestOtherUrl = null;
-        int bestOtherHeight = -1;
-        int bestOtherBitrate = -1;
+        String best720AvcUrl = null;
+        int bestBitrate = -1;
 
         for (int i = 0; i < lines.size(); i++) {
             String info = lines.get(i);
@@ -911,8 +873,12 @@ public class MainActivity extends Activity {
             int height = parseHlsHeight(info);
             int bitrate = parseHlsBandwidth(info);
             String lowerInfo = info.toLowerCase();
-            boolean hevc = lowerInfo.contains("hvc1") || lowerInfo.contains("hev1") || lowerInfo.contains("hevc");
+
             boolean avc = lowerInfo.contains("avc1") || lowerInfo.contains("h264") || lowerInfo.contains("avc");
+            boolean hevc = lowerInfo.contains("hvc1") || lowerInfo.contains("hev1") || lowerInfo.contains("hevc");
+
+            // Only trust an explicitly declared AVC 720 rendition.
+            if (!avc || hevc || height < 700 || height > 750) continue;
 
             String variant = null;
             for (int j = i + 1; j < lines.size(); j++) {
@@ -922,27 +888,16 @@ public class MainActivity extends Activity {
                 variant = next;
                 break;
             }
-            if (variant == null || height <= 0 || height > targetHeight) continue;
+            if (variant == null) continue;
 
-            String absolute = new URL(new URL(masterUrl), variant).toString();
-            if (avc && !hevc) {
-                if (height > bestAvcHeight || (height == bestAvcHeight && bitrate > bestAvcBitrate)) {
-                    bestAvcHeight = height;
-                    bestAvcBitrate = bitrate;
-                    bestAvcUrl = absolute;
-                }
-            } else if (!hevc) {
-                if (height > bestOtherHeight || (height == bestOtherHeight && bitrate > bestOtherBitrate)) {
-                    bestOtherHeight = height;
-                    bestOtherBitrate = bitrate;
-                    bestOtherUrl = absolute;
-                }
+            if (bitrate > bestBitrate) {
+                bestBitrate = bitrate;
+                best720AvcUrl = new URL(new URL(masterUrl), variant).toString();
             }
         }
 
-        if (bestAvcUrl != null) return bestAvcUrl;
-        if (bestOtherUrl != null) return bestOtherUrl;
-        return masterUrl;
+        // Never guess another codec/resolution. Let the vendor parser handle the master.
+        return best720AvcUrl != null ? best720AvcUrl : masterUrl;
     }
 
     private int parseHlsHeight(String info) {
@@ -995,7 +950,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.4.3 MiTV3-60")
+                        : "SolYan-IPTV/0.4.4 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);

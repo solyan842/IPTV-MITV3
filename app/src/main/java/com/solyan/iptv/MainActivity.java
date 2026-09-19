@@ -6,6 +6,8 @@ import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -17,6 +19,7 @@ import android.view.WindowManager;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.SurfaceView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -82,11 +85,15 @@ public class MainActivity extends Activity {
     private LinearLayout channelDrawer;
     private ListView channelList;
     private PlayerView playerView;
+    private SurfaceView nativeSurface;
     private Button modeButton;
     private Button sourceButton;
     private Button channelsButton;
 
     private ExoPlayer player;
+    private MediaPlayer nativePlayer;
+    private boolean nativeActive = false;
+    private Channel nativeFallbackChannel;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final List<Channel> channels = new ArrayList<>();
@@ -122,6 +129,7 @@ public class MainActivity extends Activity {
         channelDrawer = findViewById(R.id.channelDrawer);
         channelList = findViewById(R.id.channelList);
         playerView = findViewById(R.id.playerView);
+        nativeSurface = findViewById(R.id.nativeSurface);
         modeButton = findViewById(R.id.safeButton);
         sourceButton = findViewById(R.id.sourceButton);
         channelsButton = findViewById(R.id.channelsButton);
@@ -216,8 +224,8 @@ public class MainActivity extends Activity {
     private void hideChannelDrawer() {
         uiHandler.removeCallbacks(hideDrawerRunnable);
         channelDrawer.setVisibility(View.GONE);
-        if (player != null && player.isPlaying()) {
-            playerView.requestFocus();
+        if (isAnyPlayerPlaying()) {
+            requestPlaybackFocus();
             scheduleCleanPlaybackUi();
         } else {
             topBar.setVisibility(View.VISIBLE);
@@ -265,7 +273,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.7 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.8 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -294,8 +302,8 @@ public class MainActivity extends Activity {
                 } else if (state == Player.STATE_READY) {
                     lastReadyAt = android.os.SystemClock.elapsedRealtime();
                     showStatus("Đang phát · " + effectiveQualityText(), 1400);
-                    if (channelDrawer.getVisibility() != View.VISIBLE) {
-                        playerView.requestFocus();
+                    if (!nativeActive && channelDrawer.getVisibility() != View.VISIBLE) {
+                        requestPlaybackFocus();
                         scheduleCleanPlaybackUi();
                     }
                 } else if (state == Player.STATE_ENDED) {
@@ -650,7 +658,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.7 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.8 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -669,6 +677,7 @@ public class MainActivity extends Activity {
                 .putString(KEY_LAST_CHANNEL_URL, ch.url)
                 .putString(KEY_LAST_CHANNEL_NAME, ch.name)
                 .apply();
+
         activeDecoder = "";
         droppedSinceReport = 0;
         droppedSinceQualityCheck = 0;
@@ -676,11 +685,93 @@ public class MainActivity extends Activity {
         lastReadyAt = 0L;
         applyVideoMode();
         updateModeLabel();
+
+        // MiTV3 / Android 5.x: prefer the vendor native playback pipeline.
+        if (Build.VERSION.SDK_INT <= 22) {
+            startNativeChannel(ch);
+        } else {
+            startExoChannel(ch);
+        }
+    }
+
+    private void startNativeChannel(Channel ch) {
+        releaseNativePlayer();
+        nativeFallbackChannel = ch;
+        nativeActive = true;
+
+        if (player != null) {
+            player.stop();
+            player.clearMediaItems();
+        }
+        playerView.setVisibility(View.GONE);
+        nativeSurface.setVisibility(View.VISIBLE);
+        requestPlaybackFocus();
+        setStatus("Mở: " + ch.name + " · Native HW");
+
+        try {
+            MediaPlayer mp = new MediaPlayer();
+            nativePlayer = mp;
+            mp.setAudioStreamType(AudioManager.STREAM_MUSIC);
+            mp.setScreenOnWhilePlaying(true);
+            mp.setDisplay(nativeSurface.getHolder());
+
+            HashMap<String, String> headers = new HashMap<>(ch.headers);
+            if (!headers.containsKey("User-Agent")) {
+                headers.put("User-Agent", "SolYan-IPTV/0.3.8 MiTV3-60");
+            }
+            mp.setDataSource(this, Uri.parse(ch.url), headers);
+
+            mp.setOnPreparedListener(p -> {
+                if (p != nativePlayer) return;
+                try {
+                    p.start();
+                    showStatus("Đang phát · Native HW", 1400);
+                    if (channelDrawer.getVisibility() != View.VISIBLE) {
+                        requestPlaybackFocus();
+                        scheduleCleanPlaybackUi();
+                    }
+                } catch (Exception e) {
+                    fallbackToExo(ch, "Native start lỗi");
+                }
+            });
+
+            mp.setOnCompletionListener(p -> {
+                showStatus("Stream đã kết thúc", 3000);
+                showTopBarTemporarily();
+            });
+
+            mp.setOnErrorListener((p, what, extra) -> {
+                fallbackToExo(ch, "Native không tương thích");
+                return true;
+            });
+
+            mp.prepareAsync();
+        } catch (Exception e) {
+            fallbackToExo(ch, "Native không mở được");
+        }
+    }
+
+    private void fallbackToExo(Channel ch, String reason) {
+        runOnUiThread(() -> {
+            releaseNativePlayer();
+            nativeActive = false;
+            nativeSurface.setVisibility(View.GONE);
+            playerView.setVisibility(View.VISIBLE);
+            showStatus(reason + " · chuyển Perfect Lock", 1800);
+            startExoChannel(ch);
+        });
+    }
+
+    private void startExoChannel(Channel ch) {
+        nativeActive = false;
+        nativeSurface.setVisibility(View.GONE);
+        playerView.setVisibility(View.VISIBLE);
+        requestPlaybackFocus();
         setStatus("Mở: " + ch.name + " · " + modeText());
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.7 MiTV3-60")
+                        : "SolYan-IPTV/0.3.8 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -697,6 +788,19 @@ public class MainActivity extends Activity {
         player.setMediaSource(factory.createMediaSource(buildMediaItem(ch.url)));
         player.prepare();
         player.play();
+    }
+
+    private void releaseNativePlayer() {
+        MediaPlayer p = nativePlayer;
+        nativePlayer = null;
+        if (p != null) {
+            try { p.setOnPreparedListener(null); } catch (Exception ignored) {}
+            try { p.setOnErrorListener(null); } catch (Exception ignored) {}
+            try { p.setOnCompletionListener(null); } catch (Exception ignored) {}
+            try { p.stop(); } catch (Exception ignored) {}
+            try { p.reset(); } catch (Exception ignored) {}
+            try { p.release(); } catch (Exception ignored) {}
+        }
     }
 
     private MediaItem buildMediaItem(String url) {
@@ -823,6 +927,18 @@ public class MainActivity extends Activity {
         playChannel(channels.get(selectedPosition));
     }
 
+    private boolean isAnyPlayerPlaying() {
+        if (nativeActive && nativePlayer != null) {
+            try { return nativePlayer.isPlaying(); } catch (Exception ignored) {}
+        }
+        return player != null && player.isPlaying();
+    }
+
+    private void requestPlaybackFocus() {
+        if (nativeActive) nativeSurface.requestFocus();
+        else playerView.requestFocus();
+    }
+
     private void scheduleDrawerAutoHide() {
         uiHandler.removeCallbacks(hideDrawerRunnable);
         uiHandler.postDelayed(hideDrawerRunnable, 3000);
@@ -901,8 +1017,8 @@ public class MainActivity extends Activity {
                     else if (focused == channelsButton) modeButton.requestFocus();
                     return true;
                 }
-                if (key == KeyEvent.KEYCODE_DPAD_DOWN && player != null && player.isPlaying()) {
-                    playerView.requestFocus();
+                if (key == KeyEvent.KEYCODE_DPAD_DOWN && isAnyPlayerPlaying()) {
+                    requestPlaybackFocus();
                     scheduleCleanPlaybackUi();
                     return true;
                 }
@@ -921,7 +1037,7 @@ public class MainActivity extends Activity {
                 return true;
             }
 
-            if (player != null && player.isPlaying() && !channels.isEmpty()) {
+            if (isAnyPlayerPlaying() && !channels.isEmpty()) {
                 if (key == KeyEvent.KEYCODE_DPAD_UP) {
                     zapChannel(-1);
                     return true;
@@ -932,15 +1048,23 @@ public class MainActivity extends Activity {
                 }
             }
 
-            if (key == KeyEvent.KEYCODE_DPAD_UP && (player == null || !player.isPlaying())) {
+            if (key == KeyEvent.KEYCODE_DPAD_UP && !isAnyPlayerPlaying()) {
                 topBar.setVisibility(View.VISIBLE);
                 sourceButton.requestFocus();
                 return true;
             }
 
-            if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && player != null) {
-                if (player.isPlaying()) player.pause(); else player.play();
-                return true;
+            if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+                if (nativeActive && nativePlayer != null) {
+                    try {
+                        if (nativePlayer.isPlaying()) nativePlayer.pause(); else nativePlayer.start();
+                    } catch (Exception ignored) {}
+                    return true;
+                }
+                if (player != null) {
+                    if (player.isPlaying()) player.pause(); else player.play();
+                    return true;
+                }
             }
         }
         return super.dispatchKeyEvent(event);
@@ -963,6 +1087,9 @@ public class MainActivity extends Activity {
 
     @Override protected void onStop() {
         super.onStop();
+        if (nativeActive && nativePlayer != null) {
+            try { if (nativePlayer.isPlaying()) nativePlayer.pause(); } catch (Exception ignored) {}
+        }
         if (player != null) player.pause();
     }
 
@@ -971,6 +1098,7 @@ public class MainActivity extends Activity {
         super.onDestroy();
         uiHandler.removeCallbacksAndMessages(null);
         io.shutdownNow();
+        releaseNativePlayer();
         if (player != null) {
             player.release();
             player = null;

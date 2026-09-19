@@ -75,11 +75,9 @@ public class MainActivity extends Activity {
     private static final String KEY_LAST_URL = "last_url";
     private static final String KEY_LAST_CHANNEL_URL = "last_channel_url";
     private static final String KEY_LAST_CHANNEL_NAME = "last_channel_name";
-    private static final String KEY_NATIVE_QUALITY = "native_quality";
     private static final int REQ_OPEN_M3U = 3001;
 
     private enum VideoMode { ADAPTIVE_1080, MITV3_HW_1080, AUTO }
-    private enum NativeQuality { Q720, Q1080, AUTO }
 
     private TextView statusText;
     private LinearLayout topBar;
@@ -97,25 +95,12 @@ public class MainActivity extends Activity {
     private MediaPlayer nativePlayer;
     private boolean nativeActive = false;
     private int nativeGeneration = 0;
-    private boolean nativeVideoStarted = false;
-    private boolean nativeRetriedMaster = false;
-    private Channel currentChannel;
-    private final Runnable nativeVideoWatchdog = () -> {
-        if (!nativeActive || nativePlayer == null || nativeVideoStarted || currentChannel == null) return;
-        if (!nativeRetriedMaster) {
-            nativeRetriedMaster = true;
-            startNativeChannelDirect(currentChannel, currentChannel.url, true);
-        } else {
-            fallbackToExo(currentChannel, "Native có tiếng nhưng không có hình");
-        }
-    };
     private Channel nativeFallbackChannel;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
-    private VideoMode videoMode = VideoMode.MITV3_HW_1080;
-    private NativeQuality nativeQuality = NativeQuality.Q720;
+    private VideoMode videoMode = VideoMode.ADAPTIVE_1080;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -160,9 +145,8 @@ public class MainActivity extends Activity {
 
         displayHas50Hz = hasRefreshRateNear(50f);
         applyPerfectSessionRefresh();
-        nativeQuality = NativeQuality.Q720;
         buildPlayer();
-        applyFallbackQuality();
+        applyVideoMode();
         updateModeLabel();
         setStatus(CodecProbe.summary());
 
@@ -170,7 +154,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            showStatus(displayHas50Hz ? "NATIVE 720 LOCK · 50Hz" : "NATIVE 720 LOCK", 1300);
+            showStatus(displayHas50Hz ? "PERFECT LOCK · 50Hz" : "PERFECT LOCK · refresh mặc định", 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -295,7 +279,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.4.4 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.4.5 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -418,7 +402,7 @@ public class MainActivity extends Activity {
              .setMaxVideoFrameRate(50)
              .setMaxVideoBitrate(6500000)
              .setForceHighestSupportedBitrate(true)
-             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264);
+             .setPreferredVideoMimeTypes();
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
              .setMaxVideoFrameRate(60)
@@ -433,21 +417,16 @@ public class MainActivity extends Activity {
         trackSelector.setParameters(b);
     }
 
-    private void applyFallbackQuality() {
-        videoMode = VideoMode.ADAPTIVE_1080;
-        applyVideoMode();
-    }
-
     private void updateModeLabel() {
-        modeButton.setText("NATIVE 720");
-    }
-
-    private String nativeQualityText() {
-        return "NATIVE 720 LOCK";
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT LOCK");
+        else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
+        else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        return "Native 720 Lock";
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect Lock 720";
+        if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
+        return "AUTO";
     }
 
     private String decoderSuffix() {
@@ -685,7 +664,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.5 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -700,7 +679,6 @@ public class MainActivity extends Activity {
     }
 
     private void playChannel(Channel ch) {
-        currentChannel = ch;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString(KEY_LAST_CHANNEL_URL, ch.url)
                 .putString(KEY_LAST_CHANNEL_NAME, ch.name)
@@ -716,14 +694,13 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT <= 22) {
             startNativeChannel(ch);
         } else {
-            applyFallbackQuality();
+            applyVideoMode();
             updateModeLabel();
             startExoChannel(ch);
         }
     }
 
     private void startNativeChannel(Channel ch) {
-        nativeRetriedMaster = false;
         releaseNativePlayer();
         final int generation = ++nativeGeneration;
         nativeFallbackChannel = ch;
@@ -738,40 +715,8 @@ public class MainActivity extends Activity {
         requestPlaybackFocus();
         uiHandler.removeCallbacks(hideTopBarRunnable);
         uiHandler.removeCallbacks(hideStatusRunnable);
-        uiHandler.removeCallbacks(nativeVideoWatchdog);
         statusText.setVisibility(View.GONE);
         if (channelDrawer.getVisibility() != View.VISIBLE) topBar.setVisibility(View.GONE);
-
-        final HashMap<String, String> headers = new HashMap<>(ch.headers);
-        if (!headers.containsKey("User-Agent")) {
-            headers.put("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
-        }
-
-        io.execute(() -> {
-            String resolvedUrl = ch.url;
-            try {
-                resolvedUrl = resolveNativeVariant(ch.url, headers, NativeQuality.Q720);
-            } catch (Exception ignored) {
-                resolvedUrl = ch.url;
-            }
-            final String playUrl = resolvedUrl;
-            runOnUiThread(() -> {
-                if (generation != nativeGeneration) return;
-                startNativeChannelDirect(ch, playUrl, false);
-            });
-        });
-    }
-
-    private void startNativeChannelDirect(Channel ch, String playUrl, boolean retryingMaster) {
-        releaseNativePlayer();
-        final int generation = ++nativeGeneration;
-        nativeActive = true;
-        nativeVideoStarted = false;
-
-        final HashMap<String, String> headers = new HashMap<>(ch.headers);
-        if (!headers.containsKey("User-Agent")) {
-            headers.put("User-Agent", "SolYan-IPTV/0.4.4 MiTV3-60");
-        }
 
         try {
             MediaPlayer mp = new MediaPlayer();
@@ -779,15 +724,18 @@ public class MainActivity extends Activity {
             mp.setAudioStreamType(AudioManager.STREAM_MUSIC);
             mp.setScreenOnWhilePlaying(true);
             mp.setDisplay(nativeSurface.getHolder());
-            mp.setDataSource(this, Uri.parse(playUrl), headers);
+
+            HashMap<String, String> headers = new HashMap<>(ch.headers);
+            if (!headers.containsKey("User-Agent")) {
+                headers.put("User-Agent", "SolYan-IPTV/0.4.5 MiTV3-60");
+            }
+            mp.setDataSource(this, Uri.parse(ch.url), headers);
 
             mp.setOnPreparedListener(p -> {
                 if (p != nativePlayer || generation != nativeGeneration) return;
                 try {
                     p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
                     p.start();
-                    uiHandler.removeCallbacks(nativeVideoWatchdog);
-                    uiHandler.postDelayed(nativeVideoWatchdog, 4500);
                     if (channelDrawer.getVisibility() != View.VISIBLE) {
                         requestPlaybackFocus();
                         scheduleNativeCleanPlaybackUi();
@@ -799,132 +747,40 @@ public class MainActivity extends Activity {
 
             mp.setOnCompletionListener(p -> {
                 if (p != nativePlayer || generation != nativeGeneration) return;
-                uiHandler.removeCallbacks(nativeVideoWatchdog);
                 showStatus("Stream đã kết thúc", 3000);
                 showTopBarTemporarily();
             });
 
             mp.setOnInfoListener((p, what, extra) -> {
                 if (p != nativePlayer || generation != nativeGeneration) return true;
-                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                    nativeVideoStarted = true;
-                    uiHandler.removeCallbacks(nativeVideoWatchdog);
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    // Keep the native pipeline untouched; do not change quality/refresh.
                     return true;
                 }
-                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) return true;
                 if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
                     scheduleNativeCleanPlaybackUi();
                     return true;
                 }
-                if (what == MediaPlayer.MEDIA_INFO_VIDEO_TRACK_LAGGING) return true;
+                if (what == MediaPlayer.MEDIA_INFO_VIDEO_TRACK_LAGGING) {
+                    // Vendor decoder reports temporary lag. Do not trigger reselect/fallback.
+                    return true;
+                }
                 return false;
             });
 
-            mp.setOnBufferingUpdateListener((p, percent) -> {});
+            mp.setOnBufferingUpdateListener((p, percent) -> {
+                // Intentionally no UI updates while native video is playing.
+            });
 
             mp.setOnErrorListener((p, what, extra) -> {
                 if (p != nativePlayer || generation != nativeGeneration) return true;
-                uiHandler.removeCallbacks(nativeVideoWatchdog);
-                if (!retryingMaster && !nativeRetriedMaster) {
-                    nativeRetriedMaster = true;
-                    startNativeChannelDirect(ch, ch.url, true);
-                } else {
-                    fallbackToExo(ch, "Native không tương thích");
-                }
+                fallbackToExo(ch, "Native không tương thích");
                 return true;
             });
 
             mp.prepareAsync();
         } catch (Exception e) {
-            if (!retryingMaster && !nativeRetriedMaster) {
-                nativeRetriedMaster = true;
-                startNativeChannelDirect(ch, ch.url, true);
-            } else {
-                fallbackToExo(ch, "Native không mở được");
-            }
-        }
-    }
-
-    private String resolveNativeVariant(String masterUrl, Map<String, String> headers, NativeQuality quality) throws Exception {
-        if (masterUrl == null || !masterUrl.toLowerCase().contains(".m3u8")) return masterUrl;
-
-        HttpURLConnection conn = (HttpURLConnection) new URL(masterUrl).openConnection();
-        conn.setConnectTimeout(8000);
-        conn.setReadTimeout(10000);
-        conn.setInstanceFollowRedirects(true);
-        for (Map.Entry<String, String> e : headers.entrySet()) {
-            conn.setRequestProperty(e.getKey(), e.getValue());
-        }
-
-        BufferedReader br = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-        ArrayList<String> lines = new ArrayList<>();
-        String line;
-        while ((line = br.readLine()) != null) lines.add(line.trim());
-        br.close();
-        conn.disconnect();
-
-        String best720AvcUrl = null;
-        int bestBitrate = -1;
-
-        for (int i = 0; i < lines.size(); i++) {
-            String info = lines.get(i);
-            if (!info.startsWith("#EXT-X-STREAM-INF:")) continue;
-
-            int height = parseHlsHeight(info);
-            int bitrate = parseHlsBandwidth(info);
-            String lowerInfo = info.toLowerCase();
-
-            boolean avc = lowerInfo.contains("avc1") || lowerInfo.contains("h264") || lowerInfo.contains("avc");
-            boolean hevc = lowerInfo.contains("hvc1") || lowerInfo.contains("hev1") || lowerInfo.contains("hevc");
-
-            // Only trust an explicitly declared AVC 720 rendition.
-            if (!avc || hevc || height < 700 || height > 750) continue;
-
-            String variant = null;
-            for (int j = i + 1; j < lines.size(); j++) {
-                String next = lines.get(j);
-                if (next.isEmpty()) continue;
-                if (next.startsWith("#")) break;
-                variant = next;
-                break;
-            }
-            if (variant == null) continue;
-
-            if (bitrate > bestBitrate) {
-                bestBitrate = bitrate;
-                best720AvcUrl = new URL(new URL(masterUrl), variant).toString();
-            }
-        }
-
-        // Never guess another codec/resolution. Let the vendor parser handle the master.
-        return best720AvcUrl != null ? best720AvcUrl : masterUrl;
-    }
-
-    private int parseHlsHeight(String info) {
-        try {
-            int p = info.indexOf("RESOLUTION=");
-            if (p < 0) return -1;
-            int start = p + 11;
-            int end = info.indexOf(',', start);
-            String value = end < 0 ? info.substring(start) : info.substring(start, end);
-            int x = value.toLowerCase().indexOf('x');
-            if (x < 0) return -1;
-            return Integer.parseInt(value.substring(x + 1).replaceAll("[^0-9]", ""));
-        } catch (Exception e) {
-            return -1;
-        }
-    }
-
-    private int parseHlsBandwidth(String info) {
-        try {
-            int p = info.indexOf("BANDWIDTH=");
-            if (p < 0) return -1;
-            int start = p + 10;
-            int end = info.indexOf(',', start);
-            String value = end < 0 ? info.substring(start) : info.substring(start, end);
-            return Integer.parseInt(value.replaceAll("[^0-9]", ""));
-        } catch (Exception e) {
-            return -1;
+            fallbackToExo(ch, "Native không mở được");
         }
     }
 
@@ -940,8 +796,6 @@ public class MainActivity extends Activity {
     }
 
     private void startExoChannel(Channel ch) {
-        applyFallbackQuality();
-        updateModeLabel();
         nativeActive = false;
         nativeSurface.setVisibility(View.GONE);
         playerView.setVisibility(View.VISIBLE);
@@ -950,7 +804,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.4.4 MiTV3-60")
+                        : "SolYan-IPTV/0.4.5 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -970,7 +824,6 @@ public class MainActivity extends Activity {
     }
 
     private void releaseNativePlayer() {
-        uiHandler.removeCallbacks(nativeVideoWatchdog);
         nativeGeneration++;
         MediaPlayer p = nativePlayer;
         nativePlayer = null;

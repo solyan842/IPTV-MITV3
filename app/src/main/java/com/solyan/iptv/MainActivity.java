@@ -99,6 +99,7 @@ public class MainActivity extends Activity {
     private int nativeGeneration = 0;
     private boolean nativeVideoStarted = false;
     private boolean nativeRetriedMaster = false;
+    private Channel currentChannel;
     private final Runnable nativeVideoWatchdog = () -> {
         if (!nativeActive || nativePlayer == null || nativeVideoStarted || currentChannel == null) return;
         if (!nativeRetriedMaster) {
@@ -115,7 +116,6 @@ public class MainActivity extends Activity {
     private ChannelAdapter adapter;
     private VideoMode videoMode = VideoMode.MITV3_HW_1080;
     private NativeQuality nativeQuality = NativeQuality.Q1080;
-    private Channel currentChannel;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());

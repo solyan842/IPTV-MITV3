@@ -9,6 +9,8 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.util.LruCache;
 import android.view.KeyEvent;
@@ -65,6 +67,7 @@ public class MainActivity extends Activity {
     private enum VideoMode { MITV3_HW_1080, AVC_1080, AUTO }
 
     private TextView statusText;
+    private LinearLayout topBar;
     private TextView currentListText;
     private TextView drawerTitle;
     private LinearLayout channelDrawer;
@@ -78,9 +81,12 @@ public class MainActivity extends Activity {
     private final ExecutorService imageIo = Executors.newFixedThreadPool(3);
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
-    private VideoMode videoMode = VideoMode.MITV3_HW_1080;
+    private VideoMode videoMode = VideoMode.AVC_1080;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable hideTopBarRunnable = () -> hideTopBar();
+    private final Runnable hideStatusRunnable = () -> statusText.setVisibility(View.GONE);
     private int selectedPosition = 0;
     private PlaylistStore playlistStore;
 
@@ -96,6 +102,7 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         statusText = findViewById(R.id.statusText);
+        topBar = findViewById(R.id.topBar);
         currentListText = findViewById(R.id.currentListText);
         drawerTitle = findViewById(R.id.drawerTitle);
         channelDrawer = findViewById(R.id.channelDrawer);
@@ -114,14 +121,16 @@ public class MainActivity extends Activity {
         updateModeLabel();
         setStatus(CodecProbe.summary());
 
-        sourceButton.setOnClickListener(v -> showSourceMenu());
-        channelsButton.setOnClickListener(v -> toggleChannelDrawer());
+        sourceButton.setOnClickListener(v -> { showTopBarTemporarily(); showSourceMenu(); });
+        channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
-            if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AVC_1080;
-            else if (videoMode == VideoMode.AVC_1080) videoMode = VideoMode.AUTO;
-            else videoMode = VideoMode.MITV3_HW_1080;
+            showTopBarTemporarily();
+            if (videoMode == VideoMode.AVC_1080) videoMode = VideoMode.AUTO;
+            else if (videoMode == VideoMode.AUTO) videoMode = VideoMode.MITV3_HW_1080;
+            else videoMode = VideoMode.AVC_1080;
             applyVideoMode();
             updateModeLabel();
+            showStatus("Chế độ: " + modeText(), 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -140,6 +149,8 @@ public class MainActivity extends Activity {
         });
 
         autoLoadLastPlaylist();
+        enableImmersiveMode();
+        showTopBarTemporarily();
         playerView.requestFocus();
     }
 
@@ -183,6 +194,7 @@ public class MainActivity extends Activity {
             return;
         }
         channelDrawer.setVisibility(View.VISIBLE);
+        showTopBarTemporarily();
         drawerTitle.setText("DANH SÁCH KÊNH  ·  " + channels.size());
         channelList.setSelection(Math.max(0, Math.min(selectedPosition, channels.size() - 1)));
         channelList.requestFocus();
@@ -191,22 +203,23 @@ public class MainActivity extends Activity {
     private void hideChannelDrawer() {
         channelDrawer.setVisibility(View.GONE);
         playerView.requestFocus();
+        if (player != null && player.isPlaying()) scheduleCleanPlaybackUi();
     }
 
     private void buildPlayer() {
         DefaultRenderersFactory renderers = new DefaultRenderersFactory(this)
                 .setMediaCodecSelector(HardwareCodecSelector.INSTANCE)
-                .setEnableDecoderFallback(true);
+                .setEnableDecoderFallback(false);
 
         trackSelector = new DefaultTrackSelector(this);
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(10000, 28000, 1500, 3500)
+                .setBufferDurationsMs(15000, 45000, 2000, 5000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.5 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.2.6 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -227,13 +240,19 @@ public class MainActivity extends Activity {
 
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_BUFFERING) setStatus("Đang buffer…" + decoderSuffix());
-                else if (state == Player.STATE_READY) setStatus("Đang phát · " + modeText() + decoderSuffix());
-                else if (state == Player.STATE_ENDED) setStatus("Stream đã kết thúc");
+                if (state == Player.STATE_BUFFERING) showStatus("Đang buffer…", 1800);
+                else if (state == Player.STATE_READY) {
+                    showStatus("Đang phát · " + modeText(), 1600);
+                    scheduleCleanPlaybackUi();
+                } else if (state == Player.STATE_ENDED) {
+                    showStatus("Stream đã kết thúc", 3000);
+                    showTopBarTemporarily();
+                }
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                setStatus("Lỗi phát: " + readableError(error) + decoderSuffix());
+                showStatus("Lỗi phát: " + readableError(error), 6500);
+                showTopBarTemporarily();
             }
         });
 
@@ -243,13 +262,14 @@ public class MainActivity extends Activity {
                     long initializedTimestampMs, long initializationDurationMs) {
                 activeDecoder = decoderName == null ? "" : decoderName;
                 boolean sw = HardwareCodecSelector.isSoftwareCodec(activeDecoder);
-                setStatus((sw ? "⚠ SOFTWARE decoder: " : "HW decoder: ") + activeDecoder);
+                if (sw) {
+                    showStatus("⚠ Đang dùng software decoder: " + activeDecoder, 6500);
+                }
             }
 
             @Override public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
                 droppedSinceReport += droppedFrames;
-                if (droppedSinceReport >= 15) {
-                    setStatus("Dropped frames: " + droppedSinceReport + " · " + activeDecoder);
+                if (droppedSinceReport >= 120) {
                     droppedSinceReport = 0;
                 }
             }
@@ -278,13 +298,13 @@ public class MainActivity extends Activity {
 
         if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
-             .setMaxVideoFrameRate(60)
-             .setMaxVideoBitrate(12000000)
-             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H265, MimeTypes.VIDEO_H264);
+             .setMaxVideoFrameRate(50)
+             .setMaxVideoBitrate(9000000)
+             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265);
         } else if (videoMode == VideoMode.AVC_1080) {
             b.setMaxVideoSize(1920, 1080)
-             .setMaxVideoFrameRate(60)
-             .setMaxVideoBitrate(10000000)
+             .setMaxVideoFrameRate(50)
+             .setMaxVideoBitrate(8000000)
              .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264);
         } else {
             b.clearVideoSizeConstraints()
@@ -297,13 +317,13 @@ public class MainActivity extends Activity {
 
     private void updateModeLabel() {
         if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
-        else if (videoMode == VideoMode.AVC_1080) modeButton.setText("1080 AVC");
+        else if (videoMode == VideoMode.AVC_1080) modeButton.setText("1080 MƯỢT");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
-        if (videoMode == VideoMode.AVC_1080) return "1080 AVC";
+        if (videoMode == VideoMode.AVC_1080) return "1080 Mượt";
         return "AUTO";
     }
 
@@ -540,7 +560,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.5 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.6 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -561,7 +581,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.5 MiTV3-60")
+                        : "SolYan-IPTV/0.2.6 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -589,7 +609,46 @@ public class MainActivity extends Activity {
     }
 
     private void setStatus(String text) {
-        runOnUiThread(() -> statusText.setText(text));
+        showStatus(text, 2600);
+    }
+
+    private void showStatus(String text, long durationMs) {
+        runOnUiThread(() -> {
+            uiHandler.removeCallbacks(hideStatusRunnable);
+            statusText.setText(text);
+            statusText.setVisibility(View.VISIBLE);
+            if (durationMs > 0) uiHandler.postDelayed(hideStatusRunnable, durationMs);
+        });
+    }
+
+    private void showTopBarTemporarily() {
+        uiHandler.removeCallbacks(hideTopBarRunnable);
+        topBar.setVisibility(View.VISIBLE);
+        if (player != null && player.isPlaying()) {
+            uiHandler.postDelayed(hideTopBarRunnable, 2600);
+        }
+    }
+
+    private void hideTopBar() {
+        if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) return;
+        topBar.setVisibility(View.GONE);
+    }
+
+    private void scheduleCleanPlaybackUi() {
+        uiHandler.removeCallbacks(hideTopBarRunnable);
+        uiHandler.removeCallbacks(hideStatusRunnable);
+        uiHandler.postDelayed(hideTopBarRunnable, 1800);
+        uiHandler.postDelayed(hideStatusRunnable, 1800);
+    }
+
+    private void enableImmersiveMode() {
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
@@ -599,6 +658,12 @@ public class MainActivity extends Activity {
             if ((key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE)
                     && channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
                 showChannelDrawer();
+                return true;
+            }
+
+            if (key == KeyEvent.KEYCODE_DPAD_UP && channelDrawer.getVisibility() != View.VISIBLE) {
+                showTopBarTemporarily();
+                topBar.requestFocus();
                 return true;
             }
 
@@ -623,6 +688,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         super.onDestroy();
+        uiHandler.removeCallbacksAndMessages(null);
         io.shutdownNow();
         imageIo.shutdownNow();
         if (player != null) {
@@ -701,7 +767,7 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.5 MiTV3-60");
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.6 MiTV3-60");
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
                     if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());

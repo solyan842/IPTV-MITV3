@@ -128,5 +128,6 @@
         android:paddingEnd="10dp"
         android:text="Sẵn sàng"
         android:textColor="@color/muted"
-        android:textSize="12sp" />
+        android:textSize="12sp"
+        android:visibility="gone" />
 </FrameLayout>

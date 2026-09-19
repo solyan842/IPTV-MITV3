@@ -10,8 +10,8 @@ android {
         applicationId 'com.solyan.iptv'
         minSdk 21
         targetSdk 28
-        versionCode 12
-        versionName '0.3.1'
+        versionCode 13
+        versionName '0.3.2'
     }
 
     buildTypes {
@@ -36,4 +36,5 @@ dependencies {
     implementation 'com.google.android.exoplayer:exoplayer-hls:2.19.1'
     implementation 'com.google.android.exoplayer:exoplayer-dash:2.19.1'
     implementation 'com.google.android.exoplayer:exoplayer-ui:2.19.1'
+    implementation 'com.squareup.picasso:picasso:2.8'
 }

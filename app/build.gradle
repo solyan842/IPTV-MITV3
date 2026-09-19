@@ -10,8 +10,8 @@ android {
         applicationId 'com.solyan.iptv'
         minSdk 21
         targetSdk 28
-        versionCode 15
-        versionName '0.3.4'
+        versionCode 16
+        versionName '0.3.5'
     }
 
     buildTypes {

@@ -90,6 +90,19 @@ public class MainActivity extends Activity {
     private final Runnable hideStatusRunnable = () -> statusText.setVisibility(View.GONE);
     private int selectedPosition = 0;
     private long lastChannelZapAt = 0L;
+    private boolean smart720Active = false;
+    private int recentRebufferCount = 0;
+    private long lastReadyAt = 0L;
+    private int droppedSinceQualityCheck = 0;
+    private final Runnable recover1080Runnable = () -> {
+        if (smart720Active && player != null && player.isPlaying()) {
+            smart720Active = false;
+            recentRebufferCount = 0;
+            droppedSinceQualityCheck = 0;
+            applyVideoMode();
+            showStatus("Luồng đã ổn định · mở lại 1080p", 1800);
+        }
+    };
     private PlaylistStore playlistStore;
 
     private final LruCache<String, Bitmap> logoCache = new LruCache<String, Bitmap>(4096) {
@@ -130,6 +143,10 @@ public class MainActivity extends Activity {
             if (videoMode == VideoMode.ADAPTIVE_1080) videoMode = VideoMode.MITV3_HW_1080;
             else if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AUTO;
             else videoMode = VideoMode.ADAPTIVE_1080;
+            smart720Active = false;
+            recentRebufferCount = 0;
+            droppedSinceQualityCheck = 0;
+            uiHandler.removeCallbacks(recover1080Runnable);
             applyVideoMode();
             updateModeLabel();
             showStatus("Chế độ: " + modeText(), 1800);
@@ -211,7 +228,7 @@ public class MainActivity extends Activity {
     private void buildPlayer() {
         DefaultRenderersFactory renderers = new DefaultRenderersFactory(this)
                 .setMediaCodecSelector(HardwareCodecSelector.INSTANCE)
-                .setEnableDecoderFallback(false);
+                .setEnableDecoderFallback(true);
 
         trackSelector = new DefaultTrackSelector(this);
 
@@ -221,7 +238,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.7 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.2.8 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -242,9 +259,17 @@ public class MainActivity extends Activity {
 
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
-                if (state == Player.STATE_BUFFERING) showStatus("Đang buffer…", 1800);
-                else if (state == Player.STATE_READY) {
-                    showStatus("Đang phát · " + modeText(), 1600);
+                if (state == Player.STATE_BUFFERING) {
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    if (lastReadyAt > 0 && now - lastReadyAt < 30000) {
+                        recentRebufferCount++;
+                        if (recentRebufferCount >= 2) activateSmart720("buffer yếu");
+                    }
+                    showStatus("Đang buffer…", 1200);
+                } else if (state == Player.STATE_READY) {
+                    lastReadyAt = android.os.SystemClock.elapsedRealtime();
+                    schedule1080Recovery();
+                    showStatus("Đang phát · " + effectiveQualityText(), 1400);
                     scheduleCleanPlaybackUi();
                 } else if (state == Player.STATE_ENDED) {
                     showStatus("Stream đã kết thúc", 3000);
@@ -271,9 +296,12 @@ public class MainActivity extends Activity {
 
             @Override public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
                 droppedSinceReport += droppedFrames;
-                if (droppedSinceReport >= 120) {
-                    droppedSinceReport = 0;
+                droppedSinceQualityCheck += droppedFrames;
+                if (droppedSinceQualityCheck >= 45) {
+                    activateSmart720("decoder rơi frame");
+                    droppedSinceQualityCheck = 0;
                 }
+                if (droppedSinceReport >= 120) droppedSinceReport = 0;
             }
         });
     }
@@ -299,10 +327,17 @@ public class MainActivity extends Activity {
          .setExceedVideoConstraintsIfNecessary(true);
 
         if (videoMode == VideoMode.ADAPTIVE_1080) {
-            b.setMaxVideoSize(1920, 1080)
-             .setMaxVideoFrameRate(60)
-             .setMaxVideoBitrate(12000000)
-             .setPreferredVideoMimeTypes();
+            if (smart720Active) {
+                b.setMaxVideoSize(1280, 720)
+                 .setMaxVideoFrameRate(60)
+                 .setMaxVideoBitrate(5500000)
+                 .setPreferredVideoMimeTypes();
+            } else {
+                b.setMaxVideoSize(1920, 1080)
+                 .setMaxVideoFrameRate(60)
+                 .setMaxVideoBitrate(12000000)
+                 .setPreferredVideoMimeTypes();
+            }
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
              .setMaxVideoFrameRate(60)
@@ -318,13 +353,13 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("1080 AUTO");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText(smart720Active ? "SMART 720" : "SMART 1080");
         else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) return "1080 Adaptive";
+        if (videoMode == VideoMode.ADAPTIVE_1080) return smart720Active ? "Smart 720" : "Smart 1080";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
         return "AUTO";
     }
@@ -562,7 +597,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.7 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.8 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -579,11 +614,18 @@ public class MainActivity extends Activity {
     private void playChannel(Channel ch) {
         activeDecoder = "";
         droppedSinceReport = 0;
+        droppedSinceQualityCheck = 0;
+        recentRebufferCount = 0;
+        lastReadyAt = 0L;
+        smart720Active = false;
+        uiHandler.removeCallbacks(recover1080Runnable);
+        applyVideoMode();
+        updateModeLabel();
         setStatus("Mở: " + ch.name + " · " + modeText());
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.7 MiTV3-60")
+                        : "SolYan-IPTV/0.2.8 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -608,6 +650,28 @@ public class MainActivity extends Activity {
         if (lower.contains(".m3u8")) b.setMimeType(MimeTypes.APPLICATION_M3U8);
         else if (lower.contains(".mpd")) b.setMimeType(MimeTypes.APPLICATION_MPD);
         return b.build();
+    }
+
+    private void activateSmart720(String reason) {
+        if (videoMode != VideoMode.ADAPTIVE_1080 || smart720Active) return;
+        smart720Active = true;
+        uiHandler.removeCallbacks(recover1080Runnable);
+        applyVideoMode();
+        updateModeLabel();
+        showStatus("Tự hạ 720p · " + reason, 1800);
+        schedule1080Recovery();
+    }
+
+    private void schedule1080Recovery() {
+        uiHandler.removeCallbacks(recover1080Runnable);
+        if (videoMode == VideoMode.ADAPTIVE_1080 && smart720Active) {
+            uiHandler.postDelayed(recover1080Runnable, 90000);
+        }
+    }
+
+    private String effectiveQualityText() {
+        if (videoMode == VideoMode.ADAPTIVE_1080) return smart720Active ? "Smart 720" : "Smart 1080";
+        return modeText();
     }
 
     private void setStatus(String text) {
@@ -796,7 +860,7 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.7 MiTV3-60");
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.8 MiTV3-60");
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
                     if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());

@@ -12,6 +12,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
+import android.graphics.PixelFormat;
 import android.provider.OpenableColumns;
 import android.view.KeyEvent;
 import android.view.Display;
@@ -130,6 +131,8 @@ public class MainActivity extends Activity {
         channelList = findViewById(R.id.channelList);
         playerView = findViewById(R.id.playerView);
         nativeSurface = findViewById(R.id.nativeSurface);
+        nativeSurface.getHolder().setFormat(PixelFormat.OPAQUE);
+        nativeSurface.setZOrderMediaOverlay(false);
         modeButton = findViewById(R.id.safeButton);
         sourceButton = findViewById(R.id.sourceButton);
         channelsButton = findViewById(R.id.channelsButton);
@@ -273,7 +276,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.8 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.9 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -658,7 +661,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.8 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.9 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -717,18 +720,18 @@ public class MainActivity extends Activity {
 
             HashMap<String, String> headers = new HashMap<>(ch.headers);
             if (!headers.containsKey("User-Agent")) {
-                headers.put("User-Agent", "SolYan-IPTV/0.3.8 MiTV3-60");
+                headers.put("User-Agent", "SolYan-IPTV/0.3.9 MiTV3-60");
             }
             mp.setDataSource(this, Uri.parse(ch.url), headers);
 
             mp.setOnPreparedListener(p -> {
                 if (p != nativePlayer) return;
                 try {
+                    p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
                     p.start();
-                    showStatus("Đang phát · Native HW", 1400);
                     if (channelDrawer.getVisibility() != View.VISIBLE) {
                         requestPlaybackFocus();
-                        scheduleCleanPlaybackUi();
+                        scheduleNativeCleanPlaybackUi();
                     }
                 } catch (Exception e) {
                     fallbackToExo(ch, "Native start lỗi");
@@ -738,6 +741,27 @@ public class MainActivity extends Activity {
             mp.setOnCompletionListener(p -> {
                 showStatus("Stream đã kết thúc", 3000);
                 showTopBarTemporarily();
+            });
+
+            mp.setOnInfoListener((p, what, extra) -> {
+                if (p != nativePlayer) return true;
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    // Keep the native pipeline untouched; do not change quality/refresh.
+                    return true;
+                }
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    scheduleNativeCleanPlaybackUi();
+                    return true;
+                }
+                if (what == MediaPlayer.MEDIA_INFO_VIDEO_TRACK_LAGGING) {
+                    // Vendor decoder reports temporary lag. Do not trigger reselect/fallback.
+                    return true;
+                }
+                return false;
+            });
+
+            mp.setOnBufferingUpdateListener((p, percent) -> {
+                // Intentionally no UI updates while native video is playing.
             });
 
             mp.setOnErrorListener((p, what, extra) -> {
@@ -771,7 +795,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.8 MiTV3-60")
+                        : "SolYan-IPTV/0.3.9 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -795,6 +819,8 @@ public class MainActivity extends Activity {
         nativePlayer = null;
         if (p != null) {
             try { p.setOnPreparedListener(null); } catch (Exception ignored) {}
+            try { p.setOnInfoListener(null); } catch (Exception ignored) {}
+            try { p.setOnBufferingUpdateListener(null); } catch (Exception ignored) {}
             try { p.setOnErrorListener(null); } catch (Exception ignored) {}
             try { p.setOnCompletionListener(null); } catch (Exception ignored) {}
             try { p.stop(); } catch (Exception ignored) {}
@@ -960,7 +986,7 @@ public class MainActivity extends Activity {
     private void showTopBarTemporarily() {
         uiHandler.removeCallbacks(hideTopBarRunnable);
         topBar.setVisibility(View.VISIBLE);
-        if (player != null && player.isPlaying()) {
+        if (isAnyPlayerPlaying()) {
             uiHandler.postDelayed(hideTopBarRunnable, 2600);
         }
     }
@@ -969,7 +995,7 @@ public class MainActivity extends Activity {
         if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) return;
         View focused = getCurrentFocus();
         if (focused == sourceButton || focused == channelsButton || focused == modeButton) return;
-        if (player == null || !player.isPlaying()) return;
+        if (!isAnyPlayerPlaying()) return;
         topBar.setVisibility(View.GONE);
     }
 
@@ -978,6 +1004,15 @@ public class MainActivity extends Activity {
         uiHandler.removeCallbacks(hideStatusRunnable);
         uiHandler.postDelayed(hideTopBarRunnable, 1800);
         uiHandler.postDelayed(hideStatusRunnable, 1800);
+    }
+
+    private void scheduleNativeCleanPlaybackUi() {
+        uiHandler.removeCallbacks(hideTopBarRunnable);
+        uiHandler.removeCallbacks(hideStatusRunnable);
+        statusText.setVisibility(View.GONE);
+        if (channelDrawer == null || channelDrawer.getVisibility() != View.VISIBLE) {
+            topBar.setVisibility(View.GONE);
+        }
     }
 
     private void enableImmersiveMode() {
@@ -1081,7 +1116,9 @@ public class MainActivity extends Activity {
         selectedPosition = (selectedPosition + direction + count) % count;
         adapter.notifyDataSetChanged();
         Channel ch = channels.get(selectedPosition);
-        showStatus((direction > 0 ? "Kênh sau: " : "Kênh trước: ") + ch.name, 1400);
+        if (!nativeActive) {
+            showStatus((direction > 0 ? "Kênh sau: " : "Kênh trước: ") + ch.name, 1000);
+        }
         playChannel(ch);
     }
 

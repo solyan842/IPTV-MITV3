@@ -25,16 +25,14 @@ public final class HardwareCodecSelector implements MediaCodecSelector {
         if (mimeType == null || !mimeType.startsWith("video/")) return all;
 
         ArrayList<MediaCodecInfo> hw = new ArrayList<>();
-        ArrayList<MediaCodecInfo> sw = new ArrayList<>();
         for (MediaCodecInfo info : all) {
-            if (isSoftwareCodec(info.name)) sw.add(info);
-            else hw.add(info);
+            if (!isSoftwareCodec(info.name)) hw.add(info);
         }
 
-        ArrayList<MediaCodecInfo> ordered = new ArrayList<>(all.size());
-        ordered.addAll(hw);
-        ordered.addAll(sw);
-        return ordered;
+        // MiTV3: never fall back to software video decoding.
+        // If the firmware exposes multiple vendor decoders, ExoPlayer may
+        // still fall back between those hardware decoders.
+        return hw;
     }
 
     public static boolean isSoftwareCodec(String name) {

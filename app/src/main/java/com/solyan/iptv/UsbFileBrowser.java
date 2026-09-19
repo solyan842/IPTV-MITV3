@@ -23,7 +23,7 @@ public final class UsbFileBrowser {
     private UsbFileBrowser() {}
 
     public static void show(Activity activity, Callback callback) {
-        List<File> roots = discoverRoots();
+        List<File> roots = discoverRoots(activity);
         if (roots.isEmpty()) {
             callback.onNoExternalStorage();
             return;
@@ -41,7 +41,7 @@ public final class UsbFileBrowser {
                 .show();
     }
 
-    private static List<File> discoverRoots() {
+    private static List<File> discoverRoots(Activity activity) {
         Map<String, File> found = new LinkedHashMap<>();
 
         addRoot(found, Environment.getExternalStorageDirectory());
@@ -69,7 +69,7 @@ public final class UsbFileBrowser {
         };
         for (String p : direct) addRoot(found, new File(p));
 
-        parseMounts(found);
+        addStorageManagerVolumes(activity, found);\n        parseMounts(found);
 
         ArrayList<File> out = new ArrayList<>(found.values());
         Collections.sort(out, (a, b) -> {
@@ -79,6 +79,23 @@ public final class UsbFileBrowser {
             return a.getAbsolutePath().compareToIgnoreCase(b.getAbsolutePath());
         });
         return out;
+    }
+
+    private static void addStorageManagerVolumes(Activity activity, Map<String, File> found) {
+        try {
+            Object sm = activity.getSystemService("storage");
+            if (sm == null) return;
+            java.lang.reflect.Method getVolumeList = sm.getClass().getMethod("getVolumeList");
+            Object volumes = getVolumeList.invoke(sm);
+            if (!(volumes instanceof Object[])) return;
+            for (Object volume : (Object[]) volumes) {
+                try {
+                    java.lang.reflect.Method getPath = volume.getClass().getMethod("getPath");
+                    Object path = getPath.invoke(volume);
+                    if (path instanceof String) addRoot(found, new File((String) path));
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
     }
 
     private static void parseMounts(Map<String, File> found) {

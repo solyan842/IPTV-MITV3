@@ -5,14 +5,21 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.util.LruCache;
 import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
@@ -37,12 +44,18 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.net.ssl.SSLException;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "solyan_iptv";
@@ -51,66 +64,58 @@ public class MainActivity extends Activity {
 
     private enum VideoMode { MITV3_HW_1080, AVC_1080, AUTO }
 
-    private EditText urlInput;
     private TextView statusText;
     private TextView currentListText;
+    private TextView drawerTitle;
+    private LinearLayout channelDrawer;
     private ListView channelList;
     private PlayerView playerView;
     private Button modeButton;
+
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService imageIo = Executors.newFixedThreadPool(3);
     private final List<Channel> channels = new ArrayList<>();
-    private ArrayAdapter<Channel> adapter;
+    private ChannelAdapter adapter;
     private VideoMode videoMode = VideoMode.MITV3_HW_1080;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
+    private int selectedPosition = 0;
     private PlaylistStore playlistStore;
+
+    private final LruCache<String, Bitmap> logoCache = new LruCache<String, Bitmap>(4096) {
+        @Override protected int sizeOf(String key, Bitmap value) {
+            return Math.max(1, value.getByteCount() / 1024);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         setContentView(R.layout.activity_main);
 
-        urlInput = findViewById(R.id.urlInput);
         statusText = findViewById(R.id.statusText);
         currentListText = findViewById(R.id.currentListText);
+        drawerTitle = findViewById(R.id.drawerTitle);
+        channelDrawer = findViewById(R.id.channelDrawer);
         channelList = findViewById(R.id.channelList);
         playerView = findViewById(R.id.playerView);
         modeButton = findViewById(R.id.safeButton);
-
-        Button loadButton = findViewById(R.id.loadButton);
-        Button openFileButton = findViewById(R.id.openFileButton);
-        Button savedListsButton = findViewById(R.id.savedListsButton);
+        Button sourceButton = findViewById(R.id.sourceButton);
+        Button channelsButton = findViewById(R.id.channelsButton);
 
         playlistStore = new PlaylistStore(this);
-
-        adapter = new ArrayAdapter<Channel>(this, android.R.layout.simple_list_item_1, channels) {
-            @Override public View getView(int position, View convertView, android.view.ViewGroup parent) {
-                View v = super.getView(position, convertView, parent);
-                TextView t = v.findViewById(android.R.id.text1);
-                t.setTextColor(getResources().getColor(R.color.text));
-                t.setTextSize(15f);
-                t.setMinHeight(58);
-                t.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                t.setBackgroundResource(R.drawable.focus_bg);
-                t.setSingleLine(false);
-                return v;
-            }
-        };
+        adapter = new ChannelAdapter();
         channelList.setAdapter(adapter);
-
-        urlInput.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_URL, ""));
 
         buildPlayer();
         applyVideoMode();
-        modeButton.setText("MiTV3 HW 1080");
+        updateModeLabel();
         setStatus(CodecProbe.summary());
 
-        loadButton.setOnClickListener(v -> openTypedUrl());
-        openFileButton.setOnClickListener(v -> openFilePicker());
-        savedListsButton.setOnClickListener(v -> showSavedLists());
-
+        sourceButton.setOnClickListener(v -> showSourceMenu());
+        channelsButton.setOnClickListener(v -> toggleChannelDrawer());
         modeButton.setOnClickListener(v -> {
             if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AVC_1080;
             else if (videoMode == VideoMode.AVC_1080) videoMode = VideoMode.AUTO;
@@ -119,9 +124,73 @@ public class MainActivity extends Activity {
             updateModeLabel();
         });
 
-        channelList.setOnItemClickListener((p, v, pos, id) -> playChannel(channels.get(pos)));
+        channelList.setOnItemClickListener((p, v, pos, id) -> {
+            selectedPosition = pos;
+            adapter.notifyDataSetChanged();
+            playChannel(channels.get(pos));
+            hideChannelDrawer();
+        });
+
+        channelList.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                selectedPosition = position;
+                adapter.notifyDataSetChanged();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
 
         autoLoadLastPlaylist();
+        playerView.requestFocus();
+    }
+
+    private void showSourceMenu() {
+        String[] items = {"MỞ URL", "MỞ FILE / USB", "LIST ĐÃ LƯU"};
+        new AlertDialog.Builder(this)
+                .setTitle("Nguồn phát")
+                .setItems(items, (d, which) -> {
+                    if (which == 0) showUrlDialog();
+                    else if (which == 1) openFilePicker();
+                    else showSavedLists();
+                })
+                .setNegativeButton("ĐÓNG", null)
+                .show();
+    }
+
+    private void showUrlDialog() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("https://.../playlist.m3u");
+        input.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_URL, ""));
+        input.setSelectAllOnFocus(true);
+        input.setPadding(24, 8, 24, 8);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Mở URL")
+                .setView(input)
+                .setPositiveButton("MỞ", (d, w) -> openTypedUrl(input.getText().toString().trim()))
+                .setNegativeButton("HỦY", null)
+                .show();
+    }
+
+    private void toggleChannelDrawer() {
+        if (channelDrawer.getVisibility() == View.VISIBLE) hideChannelDrawer();
+        else showChannelDrawer();
+    }
+
+    private void showChannelDrawer() {
+        if (channels.isEmpty()) {
+            setStatus("Chưa có playlist. Chọn NGUỒN để mở URL hoặc file.");
+            return;
+        }
+        channelDrawer.setVisibility(View.VISIBLE);
+        drawerTitle.setText("DANH SÁCH KÊNH  ·  " + channels.size());
+        channelList.setSelection(Math.max(0, Math.min(selectedPosition, channels.size() - 1)));
+        channelList.requestFocus();
+    }
+
+    private void hideChannelDrawer() {
+        channelDrawer.setVisibility(View.GONE);
+        playerView.requestFocus();
     }
 
     private void buildPlayer() {
@@ -137,9 +206,9 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.3 MiTV3-60")
-                .setConnectTimeoutMs(10000)
-                .setReadTimeoutMs(15000)
+                .setUserAgent("SolYan-IPTV/0.2.5 MiTV3-60")
+                .setConnectTimeoutMs(12000)
+                .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
 
         DefaultMediaSourceFactory factory = new DefaultMediaSourceFactory(this)
@@ -164,7 +233,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                setStatus("Lỗi phát: " + error.getErrorCodeName() + decoderSuffix());
+                setStatus("Lỗi phát: " + readableError(error) + decoderSuffix());
             }
         });
 
@@ -185,6 +254,20 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private String readableError(PlaybackException error) {
+        Throwable c = error.getCause();
+        String msg = c != null && c.getMessage() != null ? c.getMessage() : error.getMessage();
+        if (c instanceof UnknownHostException) return "DNS / host không truy cập được";
+        if (c instanceof SocketTimeoutException) return "Kết nối stream bị timeout";
+        if (c instanceof SSLException) return "Lỗi SSL/TLS";
+        if (msg != null) {
+            if (msg.contains("403")) return "403 · stream từ chối truy cập";
+            if (msg.contains("404")) return "404 · stream không tồn tại";
+            if (msg.toLowerCase().contains("connection refused")) return "Máy chủ từ chối kết nối";
+        }
+        return error.getErrorCodeName() + (msg == null || msg.isEmpty() ? "" : " · " + msg);
     }
 
     private void applyVideoMode() {
@@ -213,21 +296,14 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.MITV3_HW_1080) {
-            modeButton.setText("MiTV3 HW 1080");
-            setStatus("1080p ≤60fps · HEVC→AVC · ưu tiên hardware decoder");
-        } else if (videoMode == VideoMode.AVC_1080) {
-            modeButton.setText("AVC 1080");
-            setStatus("1080p ≤60fps · H.264/AVC ưu tiên");
-        } else {
-            modeButton.setText("AUTO");
-            setStatus("AUTO · hardware decoder vẫn ưu tiên");
-        }
+        if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
+        else if (videoMode == VideoMode.AVC_1080) modeButton.setText("1080 AVC");
+        else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.MITV3_HW_1080) return "MiTV3 HW 1080";
-        if (videoMode == VideoMode.AVC_1080) return "AVC 1080";
+        if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
+        if (videoMode == VideoMode.AVC_1080) return "1080 AVC";
         return "AUTO";
     }
 
@@ -237,10 +313,7 @@ public class MainActivity extends Activity {
 
     private void openFilePicker() {
         UsbFileBrowser.show(this, new UsbFileBrowser.Callback() {
-            @Override public void onFileSelected(File file) {
-                openLocalPlaylistFile(file);
-            }
-
+            @Override public void onFileSelected(File file) { openLocalPlaylistFile(file); }
             @Override public void onNoExternalStorage() {
                 setStatus("Không phát hiện USB trực tiếp · mở trình chọn hệ thống");
                 openSystemFilePicker();
@@ -267,14 +340,9 @@ public class MainActivity extends Activity {
     }
 
     private void openLocalPlaylistFile(File file) {
-        String suggestedName = file.getName();
-        String lower = suggestedName.toLowerCase();
-        if (lower.endsWith(".m3u8")) suggestedName = suggestedName.substring(0, suggestedName.length() - 5);
-        else if (lower.endsWith(".m3u") || lower.endsWith(".ndl")) suggestedName = suggestedName.substring(0, suggestedName.length() - 4);
-        else if (lower.endsWith(".dl")) suggestedName = suggestedName.substring(0, suggestedName.length() - 3);
-
+        String suggestedName = stripPlaylistExtension(file.getName());
         final String defaultName = suggestedName.isEmpty() ? "Playlist TV" : suggestedName;
-        setStatus("Đang đọc USB: " + file.getAbsolutePath());
+        setStatus("Đang đọc: " + file.getAbsolutePath());
 
         io.execute(() -> {
             try {
@@ -283,9 +351,17 @@ public class MainActivity extends Activity {
                 if (parsed.isEmpty()) throw new Exception("Không tìm thấy kênh trong file");
                 runOnUiThread(() -> promptSavePlaylist(text, defaultName, file.getAbsolutePath(), parsed));
             } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Không mở được file USB: " + e.getMessage()));
+                runOnUiThread(() -> setStatus("Không mở được file: " + e.getMessage()));
             }
         });
+    }
+
+    private String stripPlaylistExtension(String name) {
+        String lower = name.toLowerCase();
+        if (lower.endsWith(".m3u8")) return name.substring(0, name.length() - 5);
+        if (lower.endsWith(".m3u") || lower.endsWith(".ndl")) return name.substring(0, name.length() - 4);
+        if (lower.endsWith(".dl")) return name.substring(0, name.length() - 3);
+        return name;
     }
 
     private String readFileText(File file) throws Exception {
@@ -301,16 +377,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_OPEN_M3U || resultCode != RESULT_OK || data == null || data.getData() == null) {
-            return;
-        }
+        if (requestCode != REQ_OPEN_M3U || resultCode != RESULT_OK || data == null || data.getData() == null) return;
 
         Uri uri = data.getData();
-        String suggestedName = fileDisplayName(uri);
-        if (suggestedName.toLowerCase().endsWith(".m3u8")) suggestedName = suggestedName.substring(0, suggestedName.length() - 5);
-        else if (suggestedName.toLowerCase().endsWith(".m3u")) suggestedName = suggestedName.substring(0, suggestedName.length() - 4);
-
-        final String defaultName = suggestedName.isEmpty() ? "Playlist TV" : suggestedName;
+        final String defaultName = stripPlaylistExtension(fileDisplayName(uri));
         setStatus("Đang đọc file M3U…");
 
         io.execute(() -> {
@@ -318,7 +388,7 @@ public class MainActivity extends Activity {
                 String text = readUriText(uri);
                 List<Channel> parsed = M3uParser.parse(text);
                 if (parsed.isEmpty()) throw new Exception("Không tìm thấy kênh trong file");
-                runOnUiThread(() -> promptSavePlaylist(text, defaultName, "FILE", parsed));
+                runOnUiThread(() -> promptSavePlaylist(text, defaultName.isEmpty() ? "Playlist TV" : defaultName, "FILE", parsed));
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Không mở được file: " + e.getMessage()));
             }
@@ -352,20 +422,15 @@ public class MainActivity extends Activity {
         return new String(out.toByteArray(), "UTF-8");
     }
 
-    private void openTypedUrl() {
-        String url = urlInput.getText().toString().trim();
+    private void openTypedUrl(String url) {
         if (url.isEmpty()) {
-            setStatus("Hãy nhập URL M3U/M3U8");
+            setStatus("URL đang trống");
             return;
         }
-
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_URL, url).apply();
 
-        if (M3uParser.looksLikePlaylistUrl(url)) {
-            loadPlaylistUrl(url);
-        } else {
-            playChannel(new Channel("Direct stream", url, "", Collections.emptyMap()));
-        }
+        if (M3uParser.looksLikePlaylistUrl(url)) loadPlaylistUrl(url);
+        else playChannel(new Channel("Direct stream", url, "", "", "", Collections.emptyMap()));
     }
 
     private void loadPlaylistUrl(String url) {
@@ -388,11 +453,11 @@ public class MainActivity extends Activity {
         input.setSingleLine(true);
         input.setText(suggestedName);
         input.setSelectAllOnFocus(true);
-        input.setPadding(24, 10, 24, 10);
+        input.setPadding(24, 8, 24, 8);
 
         new AlertDialog.Builder(this)
                 .setTitle("Đặt tên playlist")
-                .setMessage("List sẽ được lưu trong app. Lần sau không cần mở file/URL lại.")
+                .setMessage("Lưu lại để lần sau mở app không cần chọn lại.")
                 .setView(input)
                 .setPositiveButton("LƯU", (dialog, which) -> {
                     String name = input.getText().toString().trim();
@@ -401,6 +466,7 @@ public class MainActivity extends Activity {
                         playlistStore.save(name, text, source);
                         applyParsedPlaylist(parsed, name);
                         setStatus("Đã lưu “" + name + "” · " + parsed.size() + " kênh");
+                        showChannelDrawer();
                     } catch (Exception e) {
                         setStatus("Lỗi lưu playlist: " + e.getMessage());
                     }
@@ -408,6 +474,7 @@ public class MainActivity extends Activity {
                 .setNegativeButton("CHỈ MỞ", (dialog, which) -> {
                     applyParsedPlaylist(parsed, suggestedName);
                     setStatus("Đã mở " + parsed.size() + " kênh · chưa lưu");
+                    showChannelDrawer();
                 })
                 .show();
     }
@@ -418,7 +485,6 @@ public class MainActivity extends Activity {
             setStatus("Chưa có playlist nào được lưu");
             return;
         }
-
         String[] names = new String[saved.size()];
         for (int i = 0; i < saved.size(); i++) names[i] = saved.get(i).name;
 
@@ -454,9 +520,10 @@ public class MainActivity extends Activity {
     private void applyParsedPlaylist(List<Channel> parsed, String displayName) {
         channels.clear();
         channels.addAll(parsed);
+        selectedPosition = 0;
         adapter.notifyDataSetChanged();
-        currentListText.setText("Playlist: " + displayName + " · " + parsed.size() + " kênh");
-        if (!parsed.isEmpty()) channelList.requestFocus();
+        currentListText.setText(displayName + " · " + parsed.size() + " kênh");
+        drawerTitle.setText("DANH SÁCH KÊNH  ·  " + parsed.size());
     }
 
     private String hostName(String url) {
@@ -470,12 +537,11 @@ public class MainActivity extends Activity {
 
     private String downloadText(String urlString) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(urlString).openConnection();
-        c.setConnectTimeout(10000);
-        c.setReadTimeout(15000);
+        c.setConnectTimeout(12000);
+        c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.3 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.5 MiTV3-60");
         c.connect();
-
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
 
@@ -495,13 +561,13 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.3 MiTV3-60")
-                .setConnectTimeoutMs(10000)
-                .setReadTimeoutMs(15000)
+                        : "SolYan-IPTV/0.2.5 MiTV3-60")
+                .setConnectTimeoutMs(12000)
+                .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
 
         if (!ch.headers.isEmpty()) {
-            java.util.HashMap<String, String> headers = new java.util.HashMap<>(ch.headers);
+            HashMap<String, String> headers = new HashMap<>(ch.headers);
             headers.remove("User-Agent");
             http.setDefaultRequestProperties(headers);
         }
@@ -527,10 +593,25 @@ public class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event.getAction() == KeyEvent.ACTION_DOWN &&
-                event.getKeyCode() == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && player != null) {
-            if (player.isPlaying()) player.pause(); else player.play();
-            return true;
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            int key = event.getKeyCode();
+
+            if ((key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE)
+                    && channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
+                showChannelDrawer();
+                return true;
+            }
+
+            if ((key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_BACK)
+                    && channelDrawer.getVisibility() == View.VISIBLE) {
+                hideChannelDrawer();
+                return true;
+            }
+
+            if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && player != null) {
+                if (player.isPlaying()) player.pause(); else player.play();
+                return true;
+            }
         }
         return super.dispatchKeyEvent(event);
     }
@@ -543,9 +624,103 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         super.onDestroy();
         io.shutdownNow();
+        imageIo.shutdownNow();
         if (player != null) {
             player.release();
             player = null;
         }
+    }
+
+    private final class ChannelAdapter extends ArrayAdapter<Channel> {
+        private final LayoutInflater inflater = LayoutInflater.from(MainActivity.this);
+
+        ChannelAdapter() {
+            super(MainActivity.this, 0, channels);
+        }
+
+        @Override public View getView(int position, View convertView, ViewGroup parent) {
+            ViewHolder h;
+            if (convertView == null) {
+                convertView = inflater.inflate(R.layout.channel_list_item, parent, false);
+                h = new ViewHolder();
+                h.row = convertView.findViewById(R.id.channelRow);
+                h.logo = convertView.findViewById(R.id.channelLogo);
+                h.name = convertView.findViewById(R.id.channelName);
+                h.group = convertView.findViewById(R.id.channelGroup);
+                convertView.setTag(h);
+            } else {
+                h = (ViewHolder) convertView.getTag();
+            }
+
+            Channel ch = getItem(position);
+            if (ch == null) return convertView;
+
+            h.name.setText(ch.name);
+            h.group.setText(ch.group == null || ch.group.trim().isEmpty() ? "Kênh TV" : ch.group);
+
+            boolean selected = position == selectedPosition;
+            h.row.setBackgroundResource(selected ? R.drawable.channel_row_bg_selected : R.drawable.channel_row_bg);
+            h.row.setScaleX(selected ? 1.025f : 1f);
+            h.row.setScaleY(selected ? 1.025f : 1f);
+            h.row.setAlpha(selected ? 1f : 0.96f);
+
+            bindLogo(h.logo, ch);
+            return convertView;
+        }
+    }
+
+    private void bindLogo(ImageView imageView, Channel ch) {
+        String logo = ch.logoUrl == null ? "" : ch.logoUrl.trim();
+        imageView.setTag(logo);
+        imageView.setImageResource(R.drawable.solyan_iptv_logo);
+        if (logo.isEmpty()) return;
+
+        Bitmap cached = logoCache.get(logo);
+        if (cached != null) {
+            imageView.setImageBitmap(cached);
+            return;
+        }
+
+        imageIo.execute(() -> {
+            Bitmap bmp = downloadBitmap(logo, ch.headers);
+            if (bmp != null) {
+                logoCache.put(logo, bmp);
+                runOnUiThread(() -> {
+                    Object tag = imageView.getTag();
+                    if (tag != null && logo.equals(tag.toString())) imageView.setImageBitmap(bmp);
+                });
+            }
+        });
+    }
+
+    private Bitmap downloadBitmap(String urlString, Map<String, String> headers) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(urlString).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(12000);
+            c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.5 MiTV3-60");
+            if (headers != null) {
+                for (Map.Entry<String, String> e : headers.entrySet()) {
+                    if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());
+                }
+            }
+            c.connect();
+            if (c.getResponseCode() < 200 || c.getResponseCode() >= 300) return null;
+            return BitmapFactory.decodeStream(c.getInputStream());
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    private static final class ViewHolder {
+        View row;
+        ImageView logo;
+        TextView name;
+        TextView group;
     }
 }

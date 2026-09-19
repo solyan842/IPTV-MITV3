@@ -26,6 +26,8 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.Format;
+import com.google.android.exoplayer2.Timeline;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.ExoPlayer;
@@ -34,9 +36,13 @@ import com.google.android.exoplayer2.PlaybackException;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.analytics.AnalyticsListener;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
+import com.google.android.exoplayer2.source.MediaSource.MediaPeriodId;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
+import com.google.android.exoplayer2.trackselection.ExoTrackSelection;
+import com.google.android.exoplayer2.trackselection.FixedTrackSelection;
 import com.google.android.exoplayer2.ui.PlayerView;
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource;
+import com.google.android.exoplayer2.upstream.BandwidthMeter;
 import com.google.android.exoplayer2.util.MimeTypes;
 import com.squareup.picasso.Picasso;
 
@@ -135,7 +141,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            showStatus(displayHas50Hz ? "PERFECT 720 FIXED · 50Hz" : "PERFECT 720 FIXED · refresh mặc định", 1800);
+            showStatus(displayHas50Hz ? "PERFECT LOCK · 50Hz" : "PERFECT LOCK · refresh mặc định", 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -223,21 +229,43 @@ public class MainActivity extends Activity {
         DefaultRenderersFactory renderers = new DefaultRenderersFactory(this)
                 .setMediaCodecSelector(HardwareCodecSelector.INSTANCE)
                 .setEnableDecoderFallback(true)
+                .setEnableAudioOffload(false)
+                .setEnableAudioTrackPlaybackParams(false)
+                .setEnableAudioFloatOutput(false)
                 .setAllowedVideoJoiningTimeMs(5000);
 
-        trackSelector = new DefaultTrackSelector(this);
+        ExoTrackSelection.Factory fixedSelectionFactory =
+                new ExoTrackSelection.Factory() {
+                    @Override
+                    public ExoTrackSelection[] createTrackSelections(
+                            ExoTrackSelection.Definition[] definitions,
+                            BandwidthMeter bandwidthMeter,
+                            MediaPeriodId mediaPeriodId,
+                            Timeline timeline) {
+                        ExoTrackSelection[] selections = new ExoTrackSelection[definitions.length];
+                        for (int i = 0; i < definitions.length; i++) {
+                            ExoTrackSelection.Definition d = definitions[i];
+                            if (d == null || d.tracks.length == 0) continue;
+                            int best = chooseBestFixedTrack(d);
+                            selections[i] = new FixedTrackSelection(d.group, best, d.type);
+                        }
+                        return selections;
+                    }
+                };
+
+        trackSelector = new DefaultTrackSelector(this, fixedSelectionFactory);
         trackSelector.setParameters(
                 trackSelector.buildUponParameters()
                         .setTunnelingEnabled(false)
         );
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(30000, 90000, 5000, 8000)
+                .setBufferDurationsMs(30000, 60000, 5000, 8000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.6 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -304,6 +332,37 @@ public class MainActivity extends Activity {
         });
     }
 
+    private int chooseBestFixedTrack(ExoTrackSelection.Definition definition) {
+        int bestTrack = definition.tracks[0];
+        long bestScore = Long.MIN_VALUE;
+
+        for (int track : definition.tracks) {
+            Format f = definition.group.getFormat(track);
+            long score = 0L;
+
+            int pixels = (f.width > 0 && f.height > 0) ? f.width * f.height : 0;
+            int bitrate = f.bitrate > 0 ? f.bitrate : 0;
+            float fps = f.frameRate > 0 ? f.frameRate : 0f;
+
+            // Prefer 720p/50-style video, then bitrate. For audio, bitrate/channel info wins.
+            if (pixels > 0) {
+                score += ((long) pixels) * 1000000L;
+                if (fps > 0f && fps <= 50.5f) score += 500000000000L;
+                score += bitrate;
+            } else {
+                score += ((long) bitrate) * 1000L;
+                if (f.channelCount > 0) score += f.channelCount * 100L;
+                if (f.sampleRate > 0) score += f.sampleRate;
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestTrack = track;
+            }
+        }
+        return bestTrack;
+    }
+
     private String readableError(PlaybackException error) {
         Throwable c = error.getCause();
         String msg = c != null && c.getMessage() != null ? c.getMessage() : error.getMessage();
@@ -345,13 +404,13 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT FIXED");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT LOCK");
         else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect Fixed 720";
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect Lock 720";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
         return "AUTO";
     }
@@ -591,7 +650,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.6 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.7 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -621,7 +680,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.6 MiTV3-60")
+                        : "SolYan-IPTV/0.3.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);

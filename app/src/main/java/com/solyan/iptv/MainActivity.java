@@ -5,15 +5,12 @@ import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.database.Cursor;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Build;
 import android.provider.OpenableColumns;
-import android.util.LruCache;
 import android.view.KeyEvent;
 import android.view.Display;
 import android.view.WindowManager;
@@ -43,6 +40,7 @@ import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
 import com.google.android.exoplayer2.ui.PlayerView;
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource;
 import com.google.android.exoplayer2.util.MimeTypes;
+import com.squareup.picasso.Picasso;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -67,6 +65,8 @@ import javax.net.ssl.SSLException;
 public class MainActivity extends Activity {
     private static final String PREFS = "solyan_iptv";
     private static final String KEY_LAST_URL = "last_url";
+    private static final String KEY_LAST_CHANNEL_URL = "last_channel_url";
+    private static final String KEY_LAST_CHANNEL_NAME = "last_channel_name";
     private static final int REQ_OPEN_M3U = 3001;
 
     private enum VideoMode { ADAPTIVE_1080, MITV3_HW_1080, AUTO }
@@ -85,7 +85,6 @@ public class MainActivity extends Activity {
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private final ExecutorService imageIo = Executors.newSingleThreadExecutor();
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
     private VideoMode videoMode = VideoMode.ADAPTIVE_1080;
@@ -103,6 +102,10 @@ public class MainActivity extends Activity {
     private int droppedSinceQualityCheck = 0;
     private float currentVideoFps = 0f;
     private int originalDisplayModeId = 0;
+    private float originalPreferredRefreshRate = 0f;
+    private final Runnable hideDrawerRunnable = () -> {
+        if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) hideChannelDrawer();
+    };
     private final Runnable recoverQualityRunnable = () -> {
         if (videoMode != VideoMode.ADAPTIVE_1080 || player == null || !player.isPlaying()) return;
         if (smartStage < 1) {
@@ -116,12 +119,6 @@ public class MainActivity extends Activity {
         }
     };
     private PlaylistStore playlistStore;
-
-    private final LruCache<String, Bitmap> logoCache = new LruCache<String, Bitmap>(4096) {
-        @Override protected int sizeOf(String key, Bitmap value) {
-            return Math.max(1, value.getByteCount() / 1024);
-        }
-    };
 
     @Override
     protected void onCreate(Bundle state) {
@@ -230,9 +227,11 @@ public class MainActivity extends Activity {
         adapter.notifyDataSetChanged();
         channelList.setSelection(Math.max(0, Math.min(selectedPosition, channels.size() - 1)));
         channelList.requestFocus();
+        scheduleDrawerAutoHide();
     }
 
     private void hideChannelDrawer() {
+        uiHandler.removeCallbacks(hideDrawerRunnable);
         channelDrawer.setVisibility(View.GONE);
         if (player != null && player.isPlaying()) {
             playerView.requestFocus();
@@ -256,7 +255,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.1 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.2 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -610,7 +609,9 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     playlistStore.setLast(entry.name);
                     applyParsedPlaylist(parsed, entry.name);
+                    restoreLastChannelAndAutoplay();
                     setStatus("Đã nạp “" + entry.name + "” · " + parsed.size() + " kênh");
+                    showChannelDrawer();
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> setStatus("Không mở được list đã lưu: " + e.getMessage()));
@@ -641,7 +642,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.1 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.2 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -656,6 +657,10 @@ public class MainActivity extends Activity {
     }
 
     private void playChannel(Channel ch) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_LAST_CHANNEL_URL, ch.url)
+                .putString(KEY_LAST_CHANNEL_NAME, ch.name)
+                .apply();
         activeDecoder = "";
         droppedSinceReport = 0;
         droppedSinceQualityCheck = 0;
@@ -669,7 +674,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.1 MiTV3-60")
+                        : "SolYan-IPTV/0.3.2 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -726,44 +731,105 @@ public class MainActivity extends Activity {
     }
 
     private void maybeMatchDisplayRefresh(float fps) {
-        if (Build.VERSION.SDK_INT < 23 || fps <= 0f) return;
+        if (Build.VERSION.SDK_INT < 21 || fps <= 0f) return;
         try {
-            Display display = getWindowManager().getDefaultDisplay();
-            Display.Mode current = display.getMode();
-            if (originalDisplayModeId == 0) originalDisplayModeId = current.getModeId();
-
             float targetHz;
             if ((fps >= 24.5f && fps <= 25.5f) || (fps >= 49f && fps <= 51f)) targetHz = 50f;
             else if ((fps >= 29f && fps <= 31f) || (fps >= 59f && fps <= 61f)) targetHz = 60f;
             else return;
 
-            Display.Mode best = null;
-            float bestScore = Float.MAX_VALUE;
-            for (Display.Mode mode : display.getSupportedModes()) {
-                if (mode.getPhysicalWidth() != current.getPhysicalWidth()
-                        || mode.getPhysicalHeight() != current.getPhysicalHeight()) continue;
-                float score = Math.abs(mode.getRefreshRate() - targetHz);
-                if (score < bestScore) {
-                    bestScore = score;
-                    best = mode;
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            if (originalPreferredRefreshRate == 0f) originalPreferredRefreshRate = lp.preferredRefreshRate;
+
+            Display display = getWindowManager().getDefaultDisplay();
+
+            if (Build.VERSION.SDK_INT >= 23) {
+                Display.Mode current = display.getMode();
+                if (originalDisplayModeId == 0) originalDisplayModeId = current.getModeId();
+
+                Display.Mode best = null;
+                float bestScore = Float.MAX_VALUE;
+                for (Display.Mode mode : display.getSupportedModes()) {
+                    if (mode.getPhysicalWidth() != current.getPhysicalWidth()
+                            || mode.getPhysicalHeight() != current.getPhysicalHeight()) continue;
+                    float score = Math.abs(mode.getRefreshRate() - targetHz);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = mode;
+                    }
+                }
+                if (best != null && bestScore <= 1.5f) {
+                    lp.preferredDisplayModeId = best.getModeId();
+                    lp.preferredRefreshRate = best.getRefreshRate();
+                    getWindow().setAttributes(lp);
+                    showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(best.getRefreshRate()) + "Hz", 1400);
+                    return;
                 }
             }
-            if (best != null && bestScore <= 1.5f && best.getModeId() != current.getModeId()) {
-                WindowManager.LayoutParams lp = getWindow().getAttributes();
-                lp.preferredDisplayModeId = best.getModeId();
+
+            // Android 5.0/5.1 fallback used by MiTV3 firmwares.
+            float[] rates = display.getSupportedRefreshRates();
+            float bestRate = 0f;
+            float bestScore = Float.MAX_VALUE;
+            if (rates != null) {
+                for (float rate : rates) {
+                    float score = Math.abs(rate - targetHz);
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestRate = rate;
+                    }
+                }
+            }
+            if (bestRate > 0f && bestScore <= 1.5f) {
+                lp.preferredRefreshRate = bestRate;
                 getWindow().setAttributes(lp);
-                showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(best.getRefreshRate()) + "Hz", 1500);
+                showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(bestRate) + "Hz", 1400);
             }
         } catch (Throwable ignored) {}
     }
 
     private void restoreDisplayMode() {
-        if (Build.VERSION.SDK_INT < 23 || originalDisplayModeId == 0) return;
+        if (Build.VERSION.SDK_INT < 21) return;
         try {
             WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.preferredDisplayModeId = originalDisplayModeId;
+            if (Build.VERSION.SDK_INT >= 23 && originalDisplayModeId != 0) {
+                lp.preferredDisplayModeId = originalDisplayModeId;
+            }
+            lp.preferredRefreshRate = originalPreferredRefreshRate;
             getWindow().setAttributes(lp);
         } catch (Throwable ignored) {}
+    }
+
+    private void restoreLastChannelAndAutoplay() {
+        if (channels.isEmpty()) return;
+        String lastUrl = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_CHANNEL_URL, "");
+        String lastName = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_CHANNEL_NAME, "");
+
+        int match = 0;
+        if (!lastUrl.isEmpty()) {
+            for (int i = 0; i < channels.size(); i++) {
+                if (lastUrl.equals(channels.get(i).url)) {
+                    match = i;
+                    break;
+                }
+            }
+        } else if (!lastName.isEmpty()) {
+            for (int i = 0; i < channels.size(); i++) {
+                if (lastName.equalsIgnoreCase(channels.get(i).name)) {
+                    match = i;
+                    break;
+                }
+            }
+        }
+
+        selectedPosition = Math.max(0, Math.min(match, channels.size() - 1));
+        adapter.notifyDataSetChanged();
+        playChannel(channels.get(selectedPosition));
+    }
+
+    private void scheduleDrawerAutoHide() {
+        uiHandler.removeCallbacks(hideDrawerRunnable);
+        uiHandler.postDelayed(hideDrawerRunnable, 3000);
     }
 
     private void setStatus(String text) {
@@ -820,6 +886,7 @@ public class MainActivity extends Activity {
             boolean topFocused = focused == sourceButton || focused == channelsButton || focused == modeButton;
 
             if (drawerOpen) {
+                scheduleDrawerAutoHide();
                 if (key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_BACK) {
                     hideChannelDrawer();
                     return true;
@@ -908,7 +975,6 @@ public class MainActivity extends Activity {
         super.onDestroy();
         uiHandler.removeCallbacksAndMessages(null);
         io.shutdownNow();
-        imageIo.shutdownNow();
         if (player != null) {
             player.release();
             player = null;
@@ -958,48 +1024,14 @@ public class MainActivity extends Activity {
         imageView.setTag(logo);
         imageView.setImageResource(R.drawable.solyan_iptv_logo);
         if (logo.isEmpty()) return;
-        if (channelDrawer == null || channelDrawer.getVisibility() != View.VISIBLE) return;
 
-        Bitmap cached = logoCache.get(logo);
-        if (cached != null) {
-            imageView.setImageBitmap(cached);
-            return;
-        }
-
-        imageIo.execute(() -> {
-            Bitmap bmp = downloadBitmap(logo, ch.headers);
-            if (bmp != null) {
-                logoCache.put(logo, bmp);
-                runOnUiThread(() -> {
-                    Object tag = imageView.getTag();
-                    if (tag != null && logo.equals(tag.toString())) imageView.setImageBitmap(bmp);
-                });
-            }
-        });
-    }
-
-    private Bitmap downloadBitmap(String urlString, Map<String, String> headers) {
-        HttpURLConnection c = null;
-        try {
-            c = (HttpURLConnection) new URL(urlString).openConnection();
-            c.setConnectTimeout(8000);
-            c.setReadTimeout(12000);
-            c.setInstanceFollowRedirects(true);
-            c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.3.1 MiTV3-60");
-            if (headers != null) {
-                for (Map.Entry<String, String> e : headers.entrySet()) {
-                    if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());
-                }
-            }
-            c.connect();
-            if (c.getResponseCode() < 200 || c.getResponseCode() >= 300) return null;
-            return BitmapFactory.decodeStream(c.getInputStream());
-        } catch (Exception ignored) {
-            return null;
-        } finally {
-            if (c != null) c.disconnect();
-        }
+        Picasso.get()
+                .load(logo)
+                .placeholder(R.drawable.solyan_iptv_logo)
+                .error(R.drawable.solyan_iptv_logo)
+                .fit()
+                .centerInside()
+                .into(imageView);
     }
 
     private static final class ViewHolder {

@@ -31,7 +31,7 @@ import com.google.android.exoplayer2.upstream.DefaultHttpDataSource;
 import com.google.android.exoplayer2.util.MimeTypes;
 
 import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayOutputStream;\nimport java.io.File;\nimport java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -135,7 +135,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.2 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.2.3 MiTV3-60")
                 .setConnectTimeoutMs(10000)
                 .setReadTimeoutMs(15000)
                 .setAllowCrossProtocolRedirects(true);
@@ -234,6 +234,19 @@ public class MainActivity extends Activity {
     }
 
     private void openFilePicker() {
+        UsbFileBrowser.show(this, new UsbFileBrowser.Callback() {
+            @Override public void onFileSelected(File file) {
+                openLocalPlaylistFile(file);
+            }
+
+            @Override public void onNoExternalStorage() {
+                setStatus("Không phát hiện USB trực tiếp · mở trình chọn hệ thống");
+                openSystemFilePicker();
+            }
+        });
+    }
+
+    private void openSystemFilePicker() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
@@ -249,6 +262,38 @@ public class MainActivity extends Activity {
                 setStatus("Firmware không có trình chọn file");
             }
         }
+    }
+
+    private void openLocalPlaylistFile(File file) {
+        String suggestedName = file.getName();
+        String lower = suggestedName.toLowerCase();
+        if (lower.endsWith(".m3u8")) suggestedName = suggestedName.substring(0, suggestedName.length() - 5);
+        else if (lower.endsWith(".m3u") || lower.endsWith(".ndl")) suggestedName = suggestedName.substring(0, suggestedName.length() - 4);
+        else if (lower.endsWith(".dl")) suggestedName = suggestedName.substring(0, suggestedName.length() - 3);
+
+        final String defaultName = suggestedName.isEmpty() ? "Playlist TV" : suggestedName;
+        setStatus("Đang đọc USB: " + file.getAbsolutePath());
+
+        io.execute(() -> {
+            try {
+                String text = readFileText(file);
+                List<Channel> parsed = M3uParser.parse(text);
+                if (parsed.isEmpty()) throw new Exception("Không tìm thấy kênh trong file");
+                runOnUiThread(() -> promptSavePlaylist(text, defaultName, file.getAbsolutePath(), parsed));
+            } catch (Exception e) {
+                runOnUiThread(() -> setStatus("Không mở được file USB: " + e.getMessage()));
+            }
+        });
+    }
+
+    private String readFileText(File file) throws Exception {
+        FileInputStream in = new FileInputStream(file);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
+        in.close();
+        return new String(out.toByteArray(), "UTF-8");
     }
 
     @Override
@@ -426,7 +471,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(10000);
         c.setReadTimeout(15000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.2 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.3 MiTV3-60");
         c.connect();
 
         int code = c.getResponseCode();
@@ -448,7 +493,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.2 MiTV3-60")
+                        : "SolYan-IPTV/0.2.3 MiTV3-60")
                 .setConnectTimeoutMs(10000)
                 .setReadTimeoutMs(15000)
                 .setAllowCrossProtocolRedirects(true);

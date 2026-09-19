@@ -69,7 +69,8 @@ public final class UsbFileBrowser {
         };
         for (String p : direct) addRoot(found, new File(p));
 
-        addStorageManagerVolumes(activity, found);\n        parseMounts(found);
+        addStorageManagerVolumes(activity, found);
+        parseMounts(found);
 
         ArrayList<File> out = new ArrayList<>(found.values());
         Collections.sort(out, (a, b) -> {

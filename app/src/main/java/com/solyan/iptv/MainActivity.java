@@ -64,7 +64,7 @@ public class MainActivity extends Activity {
     private static final String KEY_LAST_URL = "last_url";
     private static final int REQ_OPEN_M3U = 3001;
 
-    private enum VideoMode { MITV3_HW_1080, AVC_1080, AUTO }
+    private enum VideoMode { ADAPTIVE_1080, MITV3_HW_1080, AUTO }
 
     private TextView statusText;
     private LinearLayout topBar;
@@ -82,13 +82,14 @@ public class MainActivity extends Activity {
     private final ExecutorService imageIo = Executors.newFixedThreadPool(3);
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
-    private VideoMode videoMode = VideoMode.AVC_1080;
+    private VideoMode videoMode = VideoMode.ADAPTIVE_1080;
     private String activeDecoder = "";
     private int droppedSinceReport = 0;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable hideTopBarRunnable = () -> hideTopBar();
     private final Runnable hideStatusRunnable = () -> statusText.setVisibility(View.GONE);
     private int selectedPosition = 0;
+    private long lastChannelZapAt = 0L;
     private PlaylistStore playlistStore;
 
     private final LruCache<String, Bitmap> logoCache = new LruCache<String, Bitmap>(4096) {
@@ -126,9 +127,9 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            if (videoMode == VideoMode.AVC_1080) videoMode = VideoMode.AUTO;
-            else if (videoMode == VideoMode.AUTO) videoMode = VideoMode.MITV3_HW_1080;
-            else videoMode = VideoMode.AVC_1080;
+            if (videoMode == VideoMode.ADAPTIVE_1080) videoMode = VideoMode.MITV3_HW_1080;
+            else if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AUTO;
+            else videoMode = VideoMode.ADAPTIVE_1080;
             applyVideoMode();
             updateModeLabel();
             showStatus("Chế độ: " + modeText(), 1800);
@@ -220,7 +221,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.6 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.2.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -297,16 +298,16 @@ public class MainActivity extends Activity {
         b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
          .setExceedVideoConstraintsIfNecessary(true);
 
-        if (videoMode == VideoMode.MITV3_HW_1080) {
+        if (videoMode == VideoMode.ADAPTIVE_1080) {
             b.setMaxVideoSize(1920, 1080)
-             .setMaxVideoFrameRate(50)
-             .setMaxVideoBitrate(9000000)
-             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264, MimeTypes.VIDEO_H265);
-        } else if (videoMode == VideoMode.AVC_1080) {
+             .setMaxVideoFrameRate(60)
+             .setMaxVideoBitrate(12000000)
+             .setPreferredVideoMimeTypes();
+        } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
-             .setMaxVideoFrameRate(50)
-             .setMaxVideoBitrate(8000000)
-             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H264);
+             .setMaxVideoFrameRate(60)
+             .setMaxVideoBitrate(12000000)
+             .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H265, MimeTypes.VIDEO_H264);
         } else {
             b.clearVideoSizeConstraints()
              .setMaxVideoFrameRate(Integer.MAX_VALUE)
@@ -317,14 +318,14 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
-        else if (videoMode == VideoMode.AVC_1080) modeButton.setText("1080 MƯỢT");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("1080 AUTO");
+        else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "1080 Adaptive";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
-        if (videoMode == VideoMode.AVC_1080) return "1080 Mượt";
         return "AUTO";
     }
 
@@ -561,7 +562,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.6 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.7 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -582,7 +583,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.6 MiTV3-60")
+                        : "SolYan-IPTV/0.2.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -656,16 +657,28 @@ public class MainActivity extends Activity {
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             int key = event.getKeyCode();
 
-            if ((key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE)
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT
                     && channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
                 showChannelDrawer();
                 return true;
             }
 
-            if (key == KeyEvent.KEYCODE_DPAD_UP && channelDrawer.getVisibility() != View.VISIBLE) {
+            if ((key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE)
+                    && channelDrawer.getVisibility() != View.VISIBLE) {
                 showTopBarTemporarily();
                 sourceButton.requestFocus();
                 return true;
+            }
+
+            if (channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
+                if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                    zapChannel(-1);
+                    return true;
+                }
+                if (key == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    zapChannel(1);
+                    return true;
+                }
             }
 
             if ((key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_BACK)
@@ -680,6 +693,21 @@ public class MainActivity extends Activity {
             }
         }
         return super.dispatchKeyEvent(event);
+    }
+
+    private void zapChannel(int direction) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastChannelZapAt < 350) return;
+        lastChannelZapAt = now;
+
+        int count = channels.size();
+        if (count == 0) return;
+
+        selectedPosition = (selectedPosition + direction + count) % count;
+        adapter.notifyDataSetChanged();
+        Channel ch = channels.get(selectedPosition);
+        showStatus((direction > 0 ? "Kênh sau: " : "Kênh trước: ") + ch.name, 1400);
+        playChannel(ch);
     }
 
     @Override protected void onStop() {
@@ -768,7 +796,7 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.6 MiTV3-60");
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.7 MiTV3-60");
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
                     if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());

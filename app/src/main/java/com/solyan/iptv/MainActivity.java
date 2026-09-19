@@ -79,7 +79,7 @@ public class MainActivity extends Activity {
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private final ExecutorService imageIo = Executors.newFixedThreadPool(3);
+    private final ExecutorService imageIo = Executors.newSingleThreadExecutor();
     private final List<Channel> channels = new ArrayList<>();
     private ChannelAdapter adapter;
     private VideoMode videoMode = VideoMode.ADAPTIVE_1080;
@@ -90,17 +90,17 @@ public class MainActivity extends Activity {
     private final Runnable hideStatusRunnable = () -> statusText.setVisibility(View.GONE);
     private int selectedPosition = 0;
     private long lastChannelZapAt = 0L;
-    private boolean smart720Active = false;
+    private boolean smart720Active = true;
     private int recentRebufferCount = 0;
     private long lastReadyAt = 0L;
     private int droppedSinceQualityCheck = 0;
     private final Runnable recover1080Runnable = () -> {
         if (smart720Active && player != null && player.isPlaying()) {
-            smart720Active = false;
+            smart720Active = (videoMode == VideoMode.ADAPTIVE_1080);
             recentRebufferCount = 0;
             droppedSinceQualityCheck = 0;
             applyVideoMode();
-            showStatus("Luồng đã ổn định · mở lại 1080p", 1800);
+            showStatus("720p ổn định · thử nâng 1080p", 1800);
         }
     };
     private PlaylistStore playlistStore;
@@ -215,6 +215,7 @@ public class MainActivity extends Activity {
         channelDrawer.setVisibility(View.VISIBLE);
         showTopBarTemporarily();
         drawerTitle.setText("DANH SÁCH KÊNH  ·  " + channels.size());
+        adapter.notifyDataSetChanged();
         channelList.setSelection(Math.max(0, Math.min(selectedPosition, channels.size() - 1)));
         channelList.requestFocus();
     }
@@ -233,12 +234,12 @@ public class MainActivity extends Activity {
         trackSelector = new DefaultTrackSelector(this);
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15000, 45000, 2000, 5000)
+                .setBufferDurationsMs(20000, 60000, 2500, 6000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.2.8 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.2.9 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -253,9 +254,7 @@ public class MainActivity extends Activity {
                 .build();
 
         playerView.setPlayer(player);
-        playerView.setUseController(true);
-        playerView.setControllerAutoShow(false);
-        playerView.setControllerShowTimeoutMs(2500);
+        playerView.setUseController(false);
 
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
@@ -597,7 +596,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.8 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.2.9 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -617,7 +616,7 @@ public class MainActivity extends Activity {
         droppedSinceQualityCheck = 0;
         recentRebufferCount = 0;
         lastReadyAt = 0L;
-        smart720Active = false;
+        smart720Active = (videoMode == VideoMode.ADAPTIVE_1080);
         uiHandler.removeCallbacks(recover1080Runnable);
         applyVideoMode();
         updateModeLabel();
@@ -625,7 +624,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.2.8 MiTV3-60")
+                        : "SolYan-IPTV/0.2.9 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -665,7 +664,7 @@ public class MainActivity extends Activity {
     private void schedule1080Recovery() {
         uiHandler.removeCallbacks(recover1080Runnable);
         if (videoMode == VideoMode.ADAPTIVE_1080 && smart720Active) {
-            uiHandler.postDelayed(recover1080Runnable, 90000);
+            uiHandler.postDelayed(recover1080Runnable, 60000);
         }
     }
 
@@ -833,6 +832,7 @@ public class MainActivity extends Activity {
         imageView.setTag(logo);
         imageView.setImageResource(R.drawable.solyan_iptv_logo);
         if (logo.isEmpty()) return;
+        if (channelDrawer == null || channelDrawer.getVisibility() != View.VISIBLE) return;
 
         Bitmap cached = logoCache.get(logo);
         if (cached != null) {
@@ -860,7 +860,7 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.8 MiTV3-60");
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.2.9 MiTV3-60");
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
                     if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());

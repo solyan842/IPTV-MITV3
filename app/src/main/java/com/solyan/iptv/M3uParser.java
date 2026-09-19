@@ -13,6 +13,8 @@ import java.util.regex.Pattern;
 
 public final class M3uParser {
     private static final Pattern GROUP = Pattern.compile("group-title=\\\"([^\\\"]*)\\\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TVG_LOGO = Pattern.compile("tvg-logo=\\\"([^\\\"]*)\\\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TVG_ID = Pattern.compile("tvg-id=\\\"([^\\\"]*)\\\"", Pattern.CASE_INSENSITIVE);
     private static final Pattern VLC_UA = Pattern.compile("#EXTVLCOPT:http-user-agent=(.*)", Pattern.CASE_INSENSITIVE);
     private static final Pattern VLC_REF = Pattern.compile("#EXTVLCOPT:http-referrer=(.*)", Pattern.CASE_INSENSITIVE);
 
@@ -22,8 +24,7 @@ public final class M3uParser {
         List<Channel> out = new ArrayList<>();
         BufferedReader br = new BufferedReader(new StringReader(text));
         String line;
-        String name = null;
-        String group = "";
+        String name = null, group = "", logoUrl = "", tvgId = "";
         Map<String, String> pendingHeaders = new LinkedHashMap<>();
 
         while ((line = br.readLine()) != null) {
@@ -35,6 +36,10 @@ public final class M3uParser {
                 name = comma >= 0 ? line.substring(comma + 1).trim() : "Kênh TV";
                 Matcher gm = GROUP.matcher(line);
                 group = gm.find() ? gm.group(1).trim() : "";
+                Matcher lm = TVG_LOGO.matcher(line);
+                logoUrl = lm.find() ? lm.group(1).trim() : "";
+                Matcher im = TVG_ID.matcher(line);
+                tvgId = im.find() ? im.group(1).trim() : "";
                 pendingHeaders.clear();
                 continue;
             }
@@ -55,9 +60,8 @@ public final class M3uParser {
                 Map<String, String> headers = new LinkedHashMap<>(pendingHeaders);
                 headers.putAll(p.headers);
                 String displayName = name == null || name.isEmpty() ? hostName(p.url) : name;
-                out.add(new Channel(displayName, p.url, group, headers));
-                name = null;
-                group = "";
+                out.add(new Channel(displayName, p.url, group, logoUrl, tvgId, headers));
+                name = null; group = ""; logoUrl = ""; tvgId = "";
                 pendingHeaders.clear();
             }
         }
@@ -90,7 +94,6 @@ public final class M3uParser {
     private static ParsedUrl parseKodiUrlHeaders(String input) {
         int pipe = input.indexOf('|');
         if (pipe < 0) return new ParsedUrl(input, new LinkedHashMap<String, String>());
-
         String url = input.substring(0, pipe).replaceAll("[?&]$", "");
         String tail = input.substring(pipe + 1);
         Map<String, String> headers = new LinkedHashMap<>();
@@ -103,6 +106,7 @@ public final class M3uParser {
             if (k.equalsIgnoreCase("referer") || k.equalsIgnoreCase("referrer")) headers.put("Referer", v);
             else if (k.equalsIgnoreCase("user-agent")) headers.put("User-Agent", v);
             else if (k.equalsIgnoreCase("origin")) headers.put("Origin", v);
+            else if (k.equalsIgnoreCase("cookie")) headers.put("Cookie", v);
         }
         return new ParsedUrl(url, headers);
     }

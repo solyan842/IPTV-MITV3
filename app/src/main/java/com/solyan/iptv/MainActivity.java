@@ -80,6 +80,7 @@ public class MainActivity extends Activity {
     private PlayerView playerView;
     private Button modeButton;
     private Button sourceButton;
+    private Button channelsButton;
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -136,7 +137,7 @@ public class MainActivity extends Activity {
         playerView = findViewById(R.id.playerView);
         modeButton = findViewById(R.id.safeButton);
         sourceButton = findViewById(R.id.sourceButton);
-        Button channelsButton = findViewById(R.id.channelsButton);
+        channelsButton = findViewById(R.id.channelsButton);
 
         playlistStore = new PlaylistStore(this);
         adapter = new ChannelAdapter();
@@ -180,8 +181,8 @@ public class MainActivity extends Activity {
 
         autoLoadLastPlaylist();
         enableImmersiveMode();
-        showTopBarTemporarily();
-        playerView.requestFocus();
+        topBar.setVisibility(View.VISIBLE);
+        sourceButton.requestFocus();
     }
 
     private void showSourceMenu() {
@@ -233,8 +234,13 @@ public class MainActivity extends Activity {
 
     private void hideChannelDrawer() {
         channelDrawer.setVisibility(View.GONE);
-        playerView.requestFocus();
-        if (player != null && player.isPlaying()) scheduleCleanPlaybackUi();
+        if (player != null && player.isPlaying()) {
+            playerView.requestFocus();
+            scheduleCleanPlaybackUi();
+        } else {
+            topBar.setVisibility(View.VISIBLE);
+            sourceButton.requestFocus();
+        }
     }
 
     private void buildPlayer() {
@@ -250,7 +256,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.0 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.1 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -280,7 +286,10 @@ public class MainActivity extends Activity {
                     lastReadyAt = android.os.SystemClock.elapsedRealtime();
                     scheduleQualityRecovery();
                     showStatus("Đang phát · " + effectiveQualityText(), 1400);
-                    scheduleCleanPlaybackUi();
+                    if (channelDrawer.getVisibility() != View.VISIBLE) {
+                        playerView.requestFocus();
+                        scheduleCleanPlaybackUi();
+                    }
                 } else if (state == Player.STATE_ENDED) {
                     showStatus("Stream đã kết thúc", 3000);
                     showTopBarTemporarily();
@@ -632,7 +641,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.0 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.1 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -660,7 +669,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.0 MiTV3-60")
+                        : "SolYan-IPTV/0.3.1 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -780,6 +789,9 @@ public class MainActivity extends Activity {
 
     private void hideTopBar() {
         if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) return;
+        View focused = getCurrentFocus();
+        if (focused == sourceButton || focused == channelsButton || focused == modeButton) return;
+        if (player == null || !player.isPlaying()) return;
         topBar.setVisibility(View.GONE);
     }
 
@@ -803,21 +815,50 @@ public class MainActivity extends Activity {
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             int key = event.getKeyCode();
+            View focused = getCurrentFocus();
+            boolean drawerOpen = channelDrawer.getVisibility() == View.VISIBLE;
+            boolean topFocused = focused == sourceButton || focused == channelsButton || focused == modeButton;
 
-            if (key == KeyEvent.KEYCODE_DPAD_LEFT
-                    && channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
-                showChannelDrawer();
-                return true;
+            if (drawerOpen) {
+                if (key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_BACK) {
+                    hideChannelDrawer();
+                    return true;
+                }
+                return super.dispatchKeyEvent(event);
             }
 
-            if ((key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE)
-                    && channelDrawer.getVisibility() != View.VISIBLE) {
+            if (topFocused) {
+                if (key == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    if (focused == modeButton) channelsButton.requestFocus();
+                    else if (focused == channelsButton) sourceButton.requestFocus();
+                    return true;
+                }
+                if (key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    if (focused == sourceButton) channelsButton.requestFocus();
+                    else if (focused == channelsButton) modeButton.requestFocus();
+                    return true;
+                }
+                if (key == KeyEvent.KEYCODE_DPAD_DOWN && player != null && player.isPlaying()) {
+                    playerView.requestFocus();
+                    scheduleCleanPlaybackUi();
+                    return true;
+                }
+                return super.dispatchKeyEvent(event);
+            }
+
+            if ((key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_GUIDE || key == KeyEvent.KEYCODE_DPAD_RIGHT)
+                    && !topFocused) {
                 showTopBarTemporarily();
                 sourceButton.requestFocus();
                 return true;
             }
 
-            if (channelDrawer.getVisibility() != View.VISIBLE && !channels.isEmpty()) {
+            if (key == KeyEvent.KEYCODE_DPAD_LEFT && !channels.isEmpty()) {
+                showChannelDrawer();
+                return true;
+            }
+
+            if (player != null && player.isPlaying() && !channels.isEmpty()) {
                 if (key == KeyEvent.KEYCODE_DPAD_UP) {
                     zapChannel(-1);
                     return true;
@@ -828,9 +869,9 @@ public class MainActivity extends Activity {
                 }
             }
 
-            if ((key == KeyEvent.KEYCODE_DPAD_RIGHT || key == KeyEvent.KEYCODE_BACK)
-                    && channelDrawer.getVisibility() == View.VISIBLE) {
-                hideChannelDrawer();
+            if (key == KeyEvent.KEYCODE_DPAD_UP && (player == null || !player.isPlaying())) {
+                topBar.setVisibility(View.VISIBLE);
+                sourceButton.requestFocus();
                 return true;
             }
 
@@ -945,7 +986,7 @@ public class MainActivity extends Activity {
             c.setReadTimeout(12000);
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("User-Agent", headers != null && headers.containsKey("User-Agent")
-                    ? headers.get("User-Agent") : "SolYan-IPTV/0.3.0 MiTV3-60");
+                    ? headers.get("User-Agent") : "SolYan-IPTV/0.3.1 MiTV3-60");
             if (headers != null) {
                 for (Map.Entry<String, String> e : headers.entrySet()) {
                     if (!"User-Agent".equalsIgnoreCase(e.getKey())) c.setRequestProperty(e.getKey(), e.getValue());

@@ -26,7 +26,6 @@ import android.widget.ListView;
 import android.widget.TextView;
 
 import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.ExoPlayer;
@@ -34,7 +33,6 @@ import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.PlaybackException;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.analytics.AnalyticsListener;
-import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
 import com.google.android.exoplayer2.ui.PlayerView;
@@ -98,12 +96,9 @@ public class MainActivity extends Activity {
     private int recentRebufferCount = 0;
     private long lastReadyAt = 0L;
     private int droppedSinceQualityCheck = 0;
-    private float currentVideoFps = 0f;
     private int originalDisplayModeId = 0;
     private float originalPreferredRefreshRate = 0f;
-    private boolean forceLowFpsForJudder = false;
     private boolean displayHas50Hz = false;
-    private boolean refreshAppliedForChannel = false;
     private final Runnable hideDrawerRunnable = () -> {
         if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) hideChannelDrawer();
     };
@@ -130,6 +125,7 @@ public class MainActivity extends Activity {
         channelList.setAdapter(adapter);
 
         displayHas50Hz = hasRefreshRateNear(50f);
+        applyPerfectSessionRefresh();
         buildPlayer();
         applyVideoMode();
         updateModeLabel();
@@ -139,7 +135,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            showStatus("STABLE 720 · ưu tiên ổn định", 1800);
+            showStatus(displayHas50Hz ? "PERFECT 720 · 50Hz cố định" : "PERFECT 720 · refresh mặc định", 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -232,16 +228,16 @@ public class MainActivity extends Activity {
         trackSelector = new DefaultTrackSelector(this);
         trackSelector.setParameters(
                 trackSelector.buildUponParameters()
-                        .setTunnelingEnabled(true)
+                        .setTunnelingEnabled(false)
         );
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(20000, 60000, 2500, 6000)
+                .setBufferDurationsMs(15000, 45000, 3000, 6000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.4 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.5 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -296,14 +292,6 @@ public class MainActivity extends Activity {
                 }
             }
 
-            @Override public void onVideoInputFormatChanged(
-                    EventTime eventTime, Format format, DecoderReuseEvaluation decoderReuseEvaluation) {
-                currentVideoFps = format == null ? 0f : format.frameRate;
-                if (currentVideoFps > 0f) {
-                    maybeMatchDisplayRefresh(currentVideoFps);
-                }
-            }
-
             @Override public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
                 droppedSinceReport += droppedFrames;
                 droppedSinceQualityCheck += droppedFrames;
@@ -337,7 +325,7 @@ public class MainActivity extends Activity {
 
         if (videoMode == VideoMode.ADAPTIVE_1080) {
             b.setMaxVideoSize(1280, 720)
-             .setMaxVideoFrameRate(60)
+             .setMaxVideoFrameRate(50)
              .setMaxVideoBitrate(6500000)
              .setPreferredVideoMimeTypes();
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
@@ -355,13 +343,13 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("STABLE 720");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT 720");
         else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) return "Stable 720";
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect 720";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
         return "AUTO";
     }
@@ -601,7 +589,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.4 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.5 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -620,20 +608,18 @@ public class MainActivity extends Activity {
                 .putString(KEY_LAST_CHANNEL_URL, ch.url)
                 .putString(KEY_LAST_CHANNEL_NAME, ch.name)
                 .apply();
-        refreshAppliedForChannel = false;
         activeDecoder = "";
         droppedSinceReport = 0;
         droppedSinceQualityCheck = 0;
         recentRebufferCount = 0;
         lastReadyAt = 0L;
-        forceLowFpsForJudder = false;
         applyVideoMode();
         updateModeLabel();
         setStatus("Mở: " + ch.name + " · " + modeText());
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.4 MiTV3-60")
+                        : "SolYan-IPTV/0.3.5 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -687,14 +673,9 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private void maybeMatchDisplayRefresh(float fps) {
-        if (Build.VERSION.SDK_INT < 21 || fps <= 0f || refreshAppliedForChannel) return;
+    private void applyPerfectSessionRefresh() {
+        if (Build.VERSION.SDK_INT < 21 || !displayHas50Hz) return;
         try {
-            float targetHz;
-            if ((fps >= 24.5f && fps <= 25.5f) || (fps >= 49f && fps <= 51f)) targetHz = 50f;
-            else if ((fps >= 29f && fps <= 31f) || (fps >= 59f && fps <= 61f)) targetHz = 60f;
-            else return;
-
             WindowManager.LayoutParams lp = getWindow().getAttributes();
             if (originalPreferredRefreshRate == 0f) originalPreferredRefreshRate = lp.preferredRefreshRate;
 
@@ -709,7 +690,7 @@ public class MainActivity extends Activity {
                 for (Display.Mode mode : display.getSupportedModes()) {
                     if (mode.getPhysicalWidth() != current.getPhysicalWidth()
                             || mode.getPhysicalHeight() != current.getPhysicalHeight()) continue;
-                    float score = Math.abs(mode.getRefreshRate() - targetHz);
+                    float score = Math.abs(mode.getRefreshRate() - 50f);
                     if (score < bestScore) {
                         bestScore = score;
                         best = mode;
@@ -719,30 +700,25 @@ public class MainActivity extends Activity {
                     lp.preferredDisplayModeId = best.getModeId();
                     lp.preferredRefreshRate = best.getRefreshRate();
                     getWindow().setAttributes(lp);
-                    refreshAppliedForChannel = true;
-                    showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(best.getRefreshRate()) + "Hz", 1400);
                     return;
                 }
             }
 
-            // Android 5.0/5.1 fallback used by MiTV3 firmwares.
             float[] rates = display.getSupportedRefreshRates();
-            float bestRate = 0f;
-            float bestScore = Float.MAX_VALUE;
             if (rates != null) {
+                float bestRate = 0f;
+                float bestScore = Float.MAX_VALUE;
                 for (float rate : rates) {
-                    float score = Math.abs(rate - targetHz);
+                    float score = Math.abs(rate - 50f);
                     if (score < bestScore) {
                         bestScore = score;
                         bestRate = rate;
                     }
                 }
-            }
-            if (bestRate > 0f && bestScore <= 1.5f) {
-                lp.preferredRefreshRate = bestRate;
-                getWindow().setAttributes(lp);
-                refreshAppliedForChannel = true;
-                showStatus("Đồng bộ " + Math.round(fps) + "fps → " + Math.round(bestRate) + "Hz", 1400);
+                if (bestRate > 0f && bestScore <= 1.5f) {
+                    lp.preferredRefreshRate = bestRate;
+                    getWindow().setAttributes(lp);
+                }
             }
         } catch (Throwable ignored) {}
     }

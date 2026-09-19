@@ -94,6 +94,7 @@ public class MainActivity extends Activity {
     private ExoPlayer player;
     private MediaPlayer nativePlayer;
     private boolean nativeActive = false;
+    private int nativeGeneration = 0;
     private Channel nativeFallbackChannel;
     private DefaultTrackSelector trackSelector;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -133,6 +134,7 @@ public class MainActivity extends Activity {
         nativeSurface = findViewById(R.id.nativeSurface);
         nativeSurface.getHolder().setFormat(PixelFormat.OPAQUE);
         nativeSurface.setZOrderMediaOverlay(false);
+        nativeSurface.setWillNotDraw(true);
         modeButton = findViewById(R.id.safeButton);
         sourceButton = findViewById(R.id.sourceButton);
         channelsButton = findViewById(R.id.channelsButton);
@@ -226,6 +228,7 @@ public class MainActivity extends Activity {
 
     private void hideChannelDrawer() {
         uiHandler.removeCallbacks(hideDrawerRunnable);
+        cancelVisibleLogoRequests();
         channelDrawer.setVisibility(View.GONE);
         if (isAnyPlayerPlaying()) {
             requestPlaybackFocus();
@@ -276,7 +279,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.9 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.4.0 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -661,7 +664,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.9 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.0 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -686,19 +689,20 @@ public class MainActivity extends Activity {
         droppedSinceQualityCheck = 0;
         recentRebufferCount = 0;
         lastReadyAt = 0L;
-        applyVideoMode();
-        updateModeLabel();
 
-        // MiTV3 / Android 5.x: prefer the vendor native playback pipeline.
+        // MiTV3 / Android 5.x: keep ExoPlayer completely idle on the native path.
         if (Build.VERSION.SDK_INT <= 22) {
             startNativeChannel(ch);
         } else {
+            applyVideoMode();
+            updateModeLabel();
             startExoChannel(ch);
         }
     }
 
     private void startNativeChannel(Channel ch) {
         releaseNativePlayer();
+        final int generation = ++nativeGeneration;
         nativeFallbackChannel = ch;
         nativeActive = true;
 
@@ -709,7 +713,10 @@ public class MainActivity extends Activity {
         playerView.setVisibility(View.GONE);
         nativeSurface.setVisibility(View.VISIBLE);
         requestPlaybackFocus();
-        setStatus("Mở: " + ch.name + " · Native HW");
+        uiHandler.removeCallbacks(hideTopBarRunnable);
+        uiHandler.removeCallbacks(hideStatusRunnable);
+        statusText.setVisibility(View.GONE);
+        if (channelDrawer.getVisibility() != View.VISIBLE) topBar.setVisibility(View.GONE);
 
         try {
             MediaPlayer mp = new MediaPlayer();
@@ -720,12 +727,12 @@ public class MainActivity extends Activity {
 
             HashMap<String, String> headers = new HashMap<>(ch.headers);
             if (!headers.containsKey("User-Agent")) {
-                headers.put("User-Agent", "SolYan-IPTV/0.3.9 MiTV3-60");
+                headers.put("User-Agent", "SolYan-IPTV/0.4.0 MiTV3-60");
             }
             mp.setDataSource(this, Uri.parse(ch.url), headers);
 
             mp.setOnPreparedListener(p -> {
-                if (p != nativePlayer) return;
+                if (p != nativePlayer || generation != nativeGeneration) return;
                 try {
                     p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
                     p.start();
@@ -739,12 +746,13 @@ public class MainActivity extends Activity {
             });
 
             mp.setOnCompletionListener(p -> {
+                if (p != nativePlayer || generation != nativeGeneration) return;
                 showStatus("Stream đã kết thúc", 3000);
                 showTopBarTemporarily();
             });
 
             mp.setOnInfoListener((p, what, extra) -> {
-                if (p != nativePlayer) return true;
+                if (p != nativePlayer || generation != nativeGeneration) return true;
                 if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
                     // Keep the native pipeline untouched; do not change quality/refresh.
                     return true;
@@ -765,6 +773,7 @@ public class MainActivity extends Activity {
             });
 
             mp.setOnErrorListener((p, what, extra) -> {
+                if (p != nativePlayer || generation != nativeGeneration) return true;
                 fallbackToExo(ch, "Native không tương thích");
                 return true;
             });
@@ -795,7 +804,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.9 MiTV3-60")
+                        : "SolYan-IPTV/0.4.0 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -815,6 +824,7 @@ public class MainActivity extends Activity {
     }
 
     private void releaseNativePlayer() {
+        nativeGeneration++;
         MediaPlayer p = nativePlayer;
         nativePlayer = null;
         if (p != null) {
@@ -1114,7 +1124,9 @@ public class MainActivity extends Activity {
         if (count == 0) return;
 
         selectedPosition = (selectedPosition + direction + count) % count;
-        adapter.notifyDataSetChanged();
+        if (channelDrawer.getVisibility() == View.VISIBLE) {
+            adapter.notifyDataSetChanged();
+        }
         Channel ch = channels.get(selectedPosition);
         if (!nativeActive) {
             showStatus((direction > 0 ? "Kênh sau: " : "Kênh trước: ") + ch.name, 1000);
@@ -1177,6 +1189,17 @@ public class MainActivity extends Activity {
 
             bindLogo(h.logo, ch);
             return convertView;
+        }
+    }
+
+    private void cancelVisibleLogoRequests() {
+        if (channelList == null) return;
+        int childCount = channelList.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            View row = channelList.getChildAt(i);
+            if (row == null) continue;
+            ImageView logo = row.findViewById(R.id.channelLogo);
+            if (logo != null) Picasso.get().cancelRequest(logo);
         }
     }
 

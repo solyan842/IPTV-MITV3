@@ -154,10 +154,10 @@ public class MainActivity extends Activity {
             if (videoMode == VideoMode.ADAPTIVE_1080) videoMode = VideoMode.MITV3_HW_1080;
             else if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AUTO;
             else videoMode = VideoMode.ADAPTIVE_1080;
-            smart720Active = false;
+            smartStage = 0;
             recentRebufferCount = 0;
             droppedSinceQualityCheck = 0;
-            uiHandler.removeCallbacks(recover1080Runnable);
+            uiHandler.removeCallbacks(recoverQualityRunnable);
             applyVideoMode();
             updateModeLabel();
             showStatus("Chế độ: " + modeText(), 1800);

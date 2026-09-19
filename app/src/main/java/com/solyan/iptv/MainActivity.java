@@ -135,7 +135,7 @@ public class MainActivity extends Activity {
         channelsButton.setOnClickListener(v -> { showTopBarTemporarily(); toggleChannelDrawer(); });
         modeButton.setOnClickListener(v -> {
             showTopBarTemporarily();
-            showStatus(displayHas50Hz ? "PERFECT 720 · 50Hz cố định" : "PERFECT 720 · refresh mặc định", 1800);
+            showStatus(displayHas50Hz ? "PERFECT 720 FIXED · 50Hz" : "PERFECT 720 FIXED · refresh mặc định", 1800);
         });
 
         channelList.setOnItemClickListener((p, v, pos, id) -> {
@@ -232,12 +232,12 @@ public class MainActivity extends Activity {
         );
 
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15000, 45000, 3000, 6000)
+                .setBufferDurationsMs(30000, 90000, 5000, 8000)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.5 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.6 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -251,6 +251,7 @@ public class MainActivity extends Activity {
                 .setMediaSourceFactory(factory)
                 .build();
 
+        player.setPlaybackSpeed(1.0f);
         playerView.setPlayer(player);
         playerView.setUseController(false);
 
@@ -327,6 +328,7 @@ public class MainActivity extends Activity {
             b.setMaxVideoSize(1280, 720)
              .setMaxVideoFrameRate(50)
              .setMaxVideoBitrate(6500000)
+             .setForceHighestSupportedBitrate(true)
              .setPreferredVideoMimeTypes();
         } else if (videoMode == VideoMode.MITV3_HW_1080) {
             b.setMaxVideoSize(1920, 1080)
@@ -343,13 +345,13 @@ public class MainActivity extends Activity {
     }
 
     private void updateModeLabel() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT 720");
+        if (videoMode == VideoMode.ADAPTIVE_1080) modeButton.setText("PERFECT FIXED");
         else if (videoMode == VideoMode.MITV3_HW_1080) modeButton.setText("1080 HW");
         else modeButton.setText("AUTO");
     }
 
     private String modeText() {
-        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect 720";
+        if (videoMode == VideoMode.ADAPTIVE_1080) return "Perfect Fixed 720";
         if (videoMode == VideoMode.MITV3_HW_1080) return "1080 HW";
         return "AUTO";
     }
@@ -589,7 +591,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.5 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.6 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -619,7 +621,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.5 MiTV3-60")
+                        : "SolYan-IPTV/0.3.6 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);

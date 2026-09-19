@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private ListView channelList;
     private PlayerView playerView;
     private Button modeButton;
+    private Button sourceButton;
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -109,7 +110,7 @@ public class MainActivity extends Activity {
         channelList = findViewById(R.id.channelList);
         playerView = findViewById(R.id.playerView);
         modeButton = findViewById(R.id.safeButton);
-        Button sourceButton = findViewById(R.id.sourceButton);
+        sourceButton = findViewById(R.id.sourceButton);
         Button channelsButton = findViewById(R.id.channelsButton);
 
         playlistStore = new PlaylistStore(this);
@@ -663,7 +664,7 @@ public class MainActivity extends Activity {
 
             if (key == KeyEvent.KEYCODE_DPAD_UP && channelDrawer.getVisibility() != View.VISIBLE) {
                 showTopBarTemporarily();
-                topBar.requestFocus();
+                sourceButton.requestFocus();
                 return true;
             }
 

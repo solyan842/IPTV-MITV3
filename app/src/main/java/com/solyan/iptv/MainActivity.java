@@ -103,11 +103,14 @@ public class MainActivity extends Activity {
     private float currentVideoFps = 0f;
     private int originalDisplayModeId = 0;
     private float originalPreferredRefreshRate = 0f;
+    private boolean forceLowFpsForJudder = false;
+    private boolean displayHas50Hz = false;
     private final Runnable hideDrawerRunnable = () -> {
         if (channelDrawer != null && channelDrawer.getVisibility() == View.VISIBLE) hideChannelDrawer();
     };
     private final Runnable recoverQualityRunnable = () -> {
         if (videoMode != VideoMode.ADAPTIVE_1080 || player == null || !player.isPlaying()) return;
+        if (forceLowFpsForJudder) return;
         if (smartStage < 1) {
             smartStage++;
             recentRebufferCount = 0;
@@ -140,6 +143,7 @@ public class MainActivity extends Activity {
         adapter = new ChannelAdapter();
         channelList.setAdapter(adapter);
 
+        displayHas50Hz = hasRefreshRateNear(50f);
         buildPlayer();
         applyVideoMode();
         updateModeLabel();
@@ -153,6 +157,7 @@ public class MainActivity extends Activity {
             else if (videoMode == VideoMode.MITV3_HW_1080) videoMode = VideoMode.AUTO;
             else videoMode = VideoMode.ADAPTIVE_1080;
             smartStage = 0;
+            forceLowFpsForJudder = false;
             recentRebufferCount = 0;
             droppedSinceQualityCheck = 0;
             uiHandler.removeCallbacks(recoverQualityRunnable);
@@ -245,7 +250,8 @@ public class MainActivity extends Activity {
     private void buildPlayer() {
         DefaultRenderersFactory renderers = new DefaultRenderersFactory(this)
                 .setMediaCodecSelector(HardwareCodecSelector.INSTANCE)
-                .setEnableDecoderFallback(true);
+                .setEnableDecoderFallback(true)
+                .setAllowedVideoJoiningTimeMs(5000);
 
         trackSelector = new DefaultTrackSelector(this);
 
@@ -255,7 +261,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.3.2 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.3.3 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -315,7 +321,10 @@ public class MainActivity extends Activity {
             @Override public void onVideoInputFormatChanged(
                     EventTime eventTime, Format format, DecoderReuseEvaluation decoderReuseEvaluation) {
                 currentVideoFps = format == null ? 0f : format.frameRate;
-                if (currentVideoFps > 0f) maybeMatchDisplayRefresh(currentVideoFps);
+                if (currentVideoFps > 0f) {
+                    maybeMatchDisplayRefresh(currentVideoFps);
+                    evaluateJudderFallback(currentVideoFps);
+                }
             }
 
             @Override public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
@@ -351,7 +360,12 @@ public class MainActivity extends Activity {
          .setExceedVideoConstraintsIfNecessary(true);
 
         if (videoMode == VideoMode.ADAPTIVE_1080) {
-            if (smartStage <= -2) {
+            if (forceLowFpsForJudder) {
+                b.setMaxVideoSize(1280, 720)
+                 .setMaxVideoFrameRate(30)
+                 .setMaxVideoBitrate(5000000)
+                 .setPreferredVideoMimeTypes();
+            } else if (smartStage <= -2) {
                 b.setMaxVideoSize(1024, 576)
                  .setMaxVideoFrameRate(30)
                  .setMaxVideoBitrate(3500000)
@@ -388,7 +402,8 @@ public class MainActivity extends Activity {
 
     private void updateModeLabel() {
         if (videoMode == VideoMode.ADAPTIVE_1080) {
-            if (smartStage <= -2) modeButton.setText("SMART 576");
+            if (forceLowFpsForJudder) modeButton.setText("SMART 720/30");
+            else if (smartStage <= -2) modeButton.setText("SMART 576");
             else if (smartStage == -1) modeButton.setText("SMART 720/30");
             else if (smartStage == 0) modeButton.setText("SMART 720");
             else modeButton.setText("SMART 1080");
@@ -398,6 +413,7 @@ public class MainActivity extends Activity {
 
     private String modeText() {
         if (videoMode == VideoMode.ADAPTIVE_1080) {
+            if (forceLowFpsForJudder) return "Smart 720/30";
             if (smartStage <= -2) return "Smart 576/30";
             if (smartStage == -1) return "Smart 720/30";
             if (smartStage == 0) return "Smart 720";
@@ -642,7 +658,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.2 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.3.3 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -667,6 +683,7 @@ public class MainActivity extends Activity {
         recentRebufferCount = 0;
         lastReadyAt = 0L;
         smartStage = 0;
+        forceLowFpsForJudder = false;
         uiHandler.removeCallbacks(recoverQualityRunnable);
         applyVideoMode();
         updateModeLabel();
@@ -674,7 +691,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.3.2 MiTV3-60")
+                        : "SolYan-IPTV/0.3.3 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -720,7 +737,7 @@ public class MainActivity extends Activity {
 
     private void scheduleQualityRecovery() {
         uiHandler.removeCallbacks(recoverQualityRunnable);
-        if (videoMode == VideoMode.ADAPTIVE_1080 && smartStage < 1) {
+        if (videoMode == VideoMode.ADAPTIVE_1080 && smartStage < 1 && !forceLowFpsForJudder) {
             long delay = smartStage < 0 ? 45000L : 60000L;
             uiHandler.postDelayed(recoverQualityRunnable, delay);
         }
@@ -728,6 +745,50 @@ public class MainActivity extends Activity {
 
     private String effectiveQualityText() {
         return modeText();
+    }
+
+    private boolean hasRefreshRateNear(float targetHz) {
+        if (Build.VERSION.SDK_INT < 21) return false;
+        try {
+            Display display = getWindowManager().getDefaultDisplay();
+            if (Build.VERSION.SDK_INT >= 23) {
+                Display.Mode current = display.getMode();
+                for (Display.Mode mode : display.getSupportedModes()) {
+                    if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                            && mode.getPhysicalHeight() == current.getPhysicalHeight()
+                            && Math.abs(mode.getRefreshRate() - targetHz) <= 1.5f) {
+                        return true;
+                    }
+                }
+            }
+            float[] rates = display.getSupportedRefreshRates();
+            if (rates != null) {
+                for (float rate : rates) {
+                    if (Math.abs(rate - targetHz) <= 1.5f) return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private void evaluateJudderFallback(float fps) {
+        if (videoMode != VideoMode.ADAPTIVE_1080) return;
+        boolean is50Family = (fps >= 49f && fps <= 51f);
+        if (is50Family && !displayHas50Hz) {
+            if (!forceLowFpsForJudder) {
+                forceLowFpsForJudder = true;
+                smartStage = Math.min(smartStage, -1);
+                uiHandler.removeCallbacks(recoverQualityRunnable);
+                applyVideoMode();
+                updateModeLabel();
+                showStatus("Panel không có 50Hz · ưu tiên 720/30 để giảm giật", 2600);
+            }
+        } else if (forceLowFpsForJudder && (!is50Family || displayHas50Hz)) {
+            forceLowFpsForJudder = false;
+            smartStage = 0;
+            applyVideoMode();
+            updateModeLabel();
+        }
     }
 
     private void maybeMatchDisplayRefresh(float fps) {

@@ -180,16 +180,49 @@ public class MainActivity extends Activity {
     }
 
     private void showSourceMenu() {
-        String[] items = {"MỞ URL", "MỞ FILE / USB", "LIST ĐÃ LƯU"};
+        String[] items = {"MỞ URL", "MỞ FILE / USB", "LIST ĐÃ LƯU", "HBO MAX"};
         new AlertDialog.Builder(this)
                 .setTitle("Nguồn phát")
                 .setItems(items, (d, which) -> {
                     if (which == 0) showUrlDialog();
                     else if (which == 1) openFilePicker();
-                    else showSavedLists();
+                    else if (which == 2) showSavedLists();
+                    else openHboMax();
                 })
                 .setNegativeButton("ĐÓNG", null)
                 .show();
+    }
+
+    private void openHboMax() {
+        String[] packages = {"com.wbd.stream", "com.wbd.hbomax"};
+        for (String packageName : packages) {
+            try {
+                Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
+                if (launch != null) {
+                    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(launch);
+                    setStatus("Đã mở HBO Max");
+                    return;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        try {
+            Intent market = new Intent(Intent.ACTION_VIEW,
+                    Uri.parse("market://details?id=com.wbd.stream"));
+            market.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(market);
+        } catch (ActivityNotFoundException e) {
+            try {
+                Intent web = new Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://play.google.com/store/apps/details?id=com.wbd.stream"));
+                web.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(web);
+            } catch (Exception ignored) {
+                setStatus("Chưa cài HBO Max và không mở được cửa hàng ứng dụng");
+            }
+        }
     }
 
     private void showUrlDialog() {

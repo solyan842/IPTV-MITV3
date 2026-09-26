@@ -73,6 +73,7 @@ import javax.net.ssl.SSLException;
 public class MainActivity extends Activity {
     private static final String PREFS = "solyan_iptv";
     private static final String KEY_LAST_URL = "last_url";
+    private static final String DEFAULT_PLAYLIST_URL = "https://tv.solyan.workers.dev";
     private static final String KEY_LAST_CHANNEL_URL = "last_channel_url";
     private static final String KEY_LAST_CHANNEL_NAME = "last_channel_name";
     private static final int REQ_OPEN_M3U = 3001;
@@ -195,7 +196,7 @@ public class MainActivity extends Activity {
         EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setHint("https://.../playlist.m3u");
-        input.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_URL, ""));
+        input.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_URL, DEFAULT_PLAYLIST_URL));
         input.setSelectAllOnFocus(true);
         input.setPadding(24, 8, 24, 8);
 
@@ -279,7 +280,7 @@ public class MainActivity extends Activity {
                 .build();
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setUserAgent("SolYan-IPTV/0.4.5 MiTV3-60")
+                .setUserAgent("SolYan-IPTV/0.4.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);
@@ -706,7 +707,7 @@ public class MainActivity extends Activity {
         c.setConnectTimeout(12000);
         c.setReadTimeout(20000);
         c.setInstanceFollowRedirects(true);
-        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.5 MiTV3-60");
+        c.setRequestProperty("User-Agent", "SolYan-IPTV/0.4.7 MiTV3-60");
         c.connect();
         int code = c.getResponseCode();
         if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
@@ -769,7 +770,7 @@ public class MainActivity extends Activity {
 
             HashMap<String, String> headers = new HashMap<>(ch.headers);
             if (!headers.containsKey("User-Agent")) {
-                headers.put("User-Agent", "SolYan-IPTV/0.4.5 MiTV3-60");
+                headers.put("User-Agent", "SolYan-IPTV/0.4.7 MiTV3-60");
             }
             mp.setDataSource(this, Uri.parse(ch.url), headers);
 
@@ -846,7 +847,7 @@ public class MainActivity extends Activity {
 
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setUserAgent(ch.headers.containsKey("User-Agent") ? ch.headers.get("User-Agent")
-                        : "SolYan-IPTV/0.4.5 MiTV3-60")
+                        : "SolYan-IPTV/0.4.7 MiTV3-60")
                 .setConnectTimeoutMs(12000)
                 .setReadTimeoutMs(20000)
                 .setAllowCrossProtocolRedirects(true);

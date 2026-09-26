@@ -625,19 +625,61 @@ public class MainActivity extends Activity {
     private void loadSavedPlaylist(PlaylistStore.Entry entry) {
         setStatus("Đang mở “" + entry.name + "”…");
         io.execute(() -> {
-            try {
-                String text = playlistStore.read(entry);
-                List<Channel> parsed = M3uParser.parse(text);
-                runOnUiThread(() -> {
-                    playlistStore.setLast(entry.name);
-                    applyParsedPlaylist(parsed, entry.name);
-                    restoreLastChannelAndAutoplay();
-                    setStatus("Đã nạp “" + entry.name + "” · " + parsed.size() + " kênh");
-                    showChannelDrawer();
-                });
-            } catch (Exception e) {
-                runOnUiThread(() -> setStatus("Không mở được list đã lưu: " + e.getMessage()));
+            String text = null;
+            List<Channel> parsed = null;
+            boolean refreshed = false;
+            Exception refreshError = null;
+
+            // URL-backed playlists are refreshed on every open so GitHub/remote updates
+            // reach the TV automatically. If the network/source is unavailable, fall
+            // back to the last known-good local copy.
+            if (entry.source != null
+                    && (entry.source.startsWith("http://") || entry.source.startsWith("https://"))
+                    && M3uParser.looksLikePlaylistUrl(entry.source)) {
+                try {
+                    String freshText = downloadText(entry.source);
+                    List<Channel> freshParsed = M3uParser.parse(freshText);
+                    if (freshParsed.isEmpty()) throw new Exception("Playlist tải về không có kênh");
+                    playlistStore.save(entry.name, freshText, entry.source);
+                    text = freshText;
+                    parsed = freshParsed;
+                    refreshed = true;
+                } catch (Exception e) {
+                    refreshError = e;
+                }
             }
+
+            if (parsed == null) {
+                try {
+                    text = playlistStore.read(entry);
+                    parsed = M3uParser.parse(text);
+                    if (parsed.isEmpty()) throw new Exception("Playlist cache không có kênh");
+                } catch (Exception e) {
+                    final String message = refreshError != null
+                            ? "Không tải được nguồn mới và cache lỗi: " + e.getMessage()
+                            : "Không mở được list đã lưu: " + e.getMessage();
+                    runOnUiThread(() -> setStatus(message));
+                    return;
+                }
+            }
+
+            final List<Channel> finalParsed = parsed;
+            final boolean finalRefreshed = refreshed;
+            final Exception finalRefreshError = refreshError;
+            runOnUiThread(() -> {
+                playlistStore.setLast(entry.name);
+                applyParsedPlaylist(finalParsed, entry.name);
+                restoreLastChannelAndAutoplay();
+                if (finalRefreshed) {
+                    setStatus("Đã cập nhật “" + entry.name + "” · " + finalParsed.size() + " kênh");
+                } else if (finalRefreshError != null) {
+                    setStatus("Mạng/nguồn chưa sẵn sàng · dùng cache “" + entry.name + "” · "
+                            + finalParsed.size() + " kênh");
+                } else {
+                    setStatus("Đã nạp “" + entry.name + "” · " + finalParsed.size() + " kênh");
+                }
+                showChannelDrawer();
+            });
         });
     }
 
